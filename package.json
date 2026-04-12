@@ -13,7 +13,7 @@
     "access": "public"
   },
   "bin": {
-    "mcp-server-template": "bin/mcp-server.js"
+    "mcp-picnic": "bin/mcp-server.js"
   },
   "files": [
     "dist",
