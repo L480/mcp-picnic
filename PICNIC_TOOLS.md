@@ -33,6 +33,19 @@ Search for products in Picnic.
 **Parameters:**
 
 - `query` (string): Search query for products
+- `limit` (number, optional): Maximum number of results to return (1-20, default: 5)
+- `offset` (number, optional): Number of results to skip for pagination (default: 0)
+
+#### `picnic_get_promotions`
+
+Get Picnic's current weekly promotions/deals from the app's "Alle acties" page.
+
+**Parameters:**
+
+- `limit` (number, optional): Maximum number of promotions to return (1-100, default: 25)
+- `offset` (number, optional): Number of promotions to skip for pagination (default: 0)
+
+**Returns:** Promoted products with product ID, promotion ID, name, current price, unit, promotion label, original price when shown, image ID, and pagination metadata.
 
 #### `picnic_get_suggestions`
 

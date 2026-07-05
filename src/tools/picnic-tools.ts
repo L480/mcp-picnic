@@ -88,6 +88,106 @@ function filterCartData(cart: unknown) {
   }
 }
 
+type UnknownRecord = Record<string, unknown>
+
+interface PicnicPromotionProduct {
+  product_id: string
+  promotion_id: string
+  name: string
+  price: number
+  unit?: string
+  promotion_label?: string
+  original_price?: number
+  image_id?: string
+  max_count?: number
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value))
+}
+
+function getRecordProperty(record: UnknownRecord, key: string): UnknownRecord | null {
+  const value = record[key]
+  return isRecord(value) ? value : null
+}
+
+function getPromotionContext(tile: UnknownRecord): UnknownRecord | null {
+  const analytics = getRecordProperty(tile, "analytics")
+  const contexts = analytics?.contexts
+  if (!Array.isArray(contexts)) return null
+
+  for (const context of contexts) {
+    if (!isRecord(context)) continue
+    const data = getRecordProperty(context, "data")
+    if (typeof data?.promotion_id === "string") return data
+  }
+
+  return null
+}
+
+function toPromotionProduct(tile: UnknownRecord): PicnicPromotionProduct | null {
+  const content = getRecordProperty(tile, "content")
+  const sellingUnit = content ? getRecordProperty(content, "sellingUnit") : null
+  const promotion = getPromotionContext(tile)
+
+  if (!sellingUnit || !promotion) return null
+  if (typeof sellingUnit.id !== "string" || typeof sellingUnit.name !== "string") return null
+  if (typeof promotion.promotion_id !== "string") return null
+
+  const price =
+    typeof promotion.price === "number"
+      ? promotion.price
+      : typeof sellingUnit.display_price === "number"
+        ? sellingUnit.display_price
+        : null
+  if (price === null) return null
+
+  return {
+    product_id: sellingUnit.id,
+    promotion_id: promotion.promotion_id,
+    name: sellingUnit.name,
+    price,
+    ...(typeof sellingUnit.unit_quantity === "string" && { unit: sellingUnit.unit_quantity }),
+    ...(typeof promotion.promotion_label === "string" && {
+      promotion_label: promotion.promotion_label,
+    }),
+    ...(typeof promotion.strikethrough_price === "number" &&
+      promotion.show_strikethrough_price !== false && {
+        original_price: promotion.strikethrough_price,
+      }),
+    ...(typeof sellingUnit.image_id === "string" && { image_id: sellingUnit.image_id }),
+    ...(typeof sellingUnit.max_count === "number" && { max_count: sellingUnit.max_count }),
+  }
+}
+
+function extractPromotionsFromPage(page: unknown): PicnicPromotionProduct[] {
+  const promotions: PicnicPromotionProduct[] = []
+  const seen = new Set<string>()
+
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child)
+      return
+    }
+
+    if (!isRecord(node)) return
+
+    const promotion = toPromotionProduct(node)
+    if (promotion) {
+      const key = `${promotion.product_id}:${promotion.promotion_id}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        promotions.push(promotion)
+      }
+    }
+
+    for (const value of Object.values(node)) visit(value)
+  }
+
+  visit(page)
+  return promotions
+}
+
 // Search products tool
 const searchInputSchema = z.object({
   query: z.string().describe("Search query for products"),
@@ -137,6 +237,60 @@ toolRegistry.register({
         returned: filteredResults.length,
         total: allResults.length,
         hasMore: startIndex + limit < allResults.length,
+      },
+    }
+  },
+})
+
+// Weekly promotions/deals tool
+const promotionsInputSchema = z.object({
+  limit: z
+    .number()
+    .min(1)
+    .max(100)
+    .default(25)
+    .describe("Maximum number of promotions to return (1-100, default: 25)"),
+  offset: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe("Number of promotions to skip for pagination (default: 0)"),
+})
+
+toolRegistry.register({
+  name: "picnic_get_promotions",
+  description:
+    "Get Picnic's current weekly promotions/deals from the app's 'Alle acties' page. " +
+    "Returns promoted products with current price, promotion label, original price when shown, " +
+    "and pagination.",
+  inputSchema: promotionsInputSchema,
+  handler: async (args) => {
+    await ensureClientInitialized()
+    const client = getPicnicClient()
+    const page = await client.sendRequest(
+      "GET",
+      "/pages/promo-page-all-promos-redirect",
+      null,
+      true,
+    )
+    const allPromotions = extractPromotionsFromPage(page)
+
+    const startIndex = args.offset ?? 0
+    const limit = args.limit ?? 25
+    const promotions = allPromotions.slice(startIndex, startIndex + limit)
+
+    return {
+      source: {
+        pageId: "promo-page-all-promos-redirect",
+        endpoint: "/pages/promo-page-all-promos-redirect",
+      },
+      promotions,
+      pagination: {
+        offset: startIndex,
+        limit,
+        returned: promotions.length,
+        total: allPromotions.length,
+        hasMore: startIndex + limit < allPromotions.length,
       },
     }
   },

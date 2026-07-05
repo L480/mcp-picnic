@@ -28,6 +28,7 @@ MCP Picnic is a bridge between AI assistants (like Claude, ChatGPT, or other MCP
 ### 🤖 AI-Powered Shopping Tools
 
 - **Product Search**: Find any product in Picnic's catalog
+- **Weekly Promotions**: Fetch current Picnic deals from the app's "Alle acties" page
 - **Cart Management**: Add, remove, and modify items in your shopping cart
 - **Order Tracking**: Monitor delivery status and driver location
 - **Account Management**: Access your profile, payment methods, and order history
@@ -551,6 +552,7 @@ The server provides comprehensive access to Picnic's functionality through 30+ s
 ### Product Discovery & Search
 
 - **`picnic_search`** - Search for products by name or keywords
+- **`picnic_get_promotions`** - Get current weekly promotions/deals with prices and labels
 - **`picnic_get_suggestions`** - Get product suggestions based on query
 - **`picnic_get_product_details`** - Get detailed information about a specific product
 - **`picnic_get_image`** - Get product images in various sizes (tiny to extra-large)
