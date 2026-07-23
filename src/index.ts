@@ -19,6 +19,8 @@ async function runServer() {
       host: config.HTTP_HOST,
       authToken: config.HTTP_AUTH_TOKEN,
       authHeaderName: config.HTTP_AUTH_HEADER_NAME,
+      oauthEnabled: config.HTTP_OAUTH_ENABLED,
+      publicUrl: config.HTTP_PUBLIC_URL,
     })
 
     // Handle graceful shutdown for HTTP server

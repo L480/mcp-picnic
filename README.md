@@ -398,6 +398,11 @@ HTTP_HOST=0.0.0.0
 HTTP_AUTH_TOKEN=replace-with-a-long-random-token
 # Optional: HTTP header name to accept token auth (default: x-mcp-token)
 HTTP_AUTH_HEADER_NAME=x-mcp-token
+# Optional: public HTTPS URL the server is reachable at. Required for the OAuth
+# flow used by Claude's custom connectors (issuer URLs must be HTTPS).
+HTTP_PUBLIC_URL=https://picnic.example.com
+# Optional: disable the OAuth wrapper (enabled by default when HTTP_AUTH_TOKEN is set)
+HTTP_OAUTH_ENABLED=true
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json
@@ -450,6 +455,39 @@ curl -H "Authorization: Bearer YOUR_TOKEN" "http://localhost:3000/sessions"
 ```
 
 If the token is missing or invalid, the server responds with `401 Unauthorized`.
+
+#### Using the server as a Claude custom connector (OAuth)
+
+Claude's **custom connectors** (claude.ai and Claude Desktop) only support OAuth –
+there is no field for pasting a static bearer token. To bridge this, the server
+automatically exposes a small OAuth 2.1 authorization server that wraps your
+`HTTP_AUTH_TOKEN` whenever the token is set (disable it with
+`HTTP_OAUTH_ENABLED=false`).
+
+Requirements:
+
+- The server must be reachable at a **public HTTPS URL** (OAuth issuer URLs must
+  be HTTPS). Set `HTTP_PUBLIC_URL` to that URL, e.g.
+  `HTTP_PUBLIC_URL=https://picnic.example.com`. Terminate TLS with a reverse
+  proxy (Caddy, nginx, Traefik, …) in front of the server.
+- Keep `HTTP_AUTH_TOKEN` set to a long random secret – this is the value you
+  will enter when connecting.
+
+How it works:
+
+1. In Claude, add a **Custom Connector** and enter your server URL, e.g.
+   `https://picnic.example.com/mcp`.
+2. Claude discovers the OAuth endpoints (`/.well-known/oauth-protected-resource`
+   and `/.well-known/oauth-authorization-server`), registers itself and opens a
+   login page.
+3. On that page, paste your `HTTP_AUTH_TOKEN` and click **Connect**. Claude
+   receives an OAuth bearer token and uses it for all subsequent requests.
+
+The endpoints (`/authorize`, `/token`, `/register`, and the `.well-known`
+metadata) are served automatically; you do not need to configure them. The
+original shared-token authentication (custom header or `Authorization: Bearer`
+with the raw token) keeps working for Claude Desktop's `mcpServers` config,
+`curl`, and other clients.
 
 ### MCP Client Configuration
 

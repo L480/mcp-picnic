@@ -2,9 +2,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { Request, Response, NextFunction } from "express"
 import cors from "cors"
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js"
+// Pulls in the `Request.auth` type augmentation from the SDK's bearer-auth middleware.
+import "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js"
 import { BaseTransportServer } from "./base.js"
 import { TransportError, ErrorCode, ErrorUtils } from "../types/errors.js"
 import { createRateLimitMiddleware, RateLimitConfig } from "../utils/rate-limiter.js"
+import { StaticTokenOAuthProvider } from "./oauth-provider.js"
 import { randomUUID, timingSafeEqual } from "crypto"
 
 /**
@@ -15,6 +19,17 @@ export interface StreamableHttpServerOptions {
   host?: string
   authToken?: string
   authHeaderName?: string
+  /**
+   * Wrap `authToken` in an OAuth 2.1 flow so OAuth-only clients (such as
+   * Claude's custom connectors) can authenticate. Defaults to `true` when an
+   * `authToken` is provided.
+   */
+  oauthEnabled?: boolean
+  /**
+   * Public base URL the server is reachable at (e.g. `https://picnic.example.com`).
+   * Used as the OAuth issuer; must be HTTPS unless the host is localhost.
+   */
+  publicUrl?: string
   corsOptions?: cors.CorsOptions
   rateLimitConfig?: RateLimitConfig
   requestTimeoutMs?: number
@@ -37,6 +52,8 @@ export class StreamableHttpServer extends BaseTransportServer {
   private rateLimiter?: ReturnType<typeof createRateLimitMiddleware>
   private transports: Record<string, StreamableHTTPServerTransport> = {}
   private sessionTimeouts = new Map<string, NodeJS.Timeout>()
+  private oauthProvider?: StaticTokenOAuthProvider
+  private resourceMetadataUrl?: string
 
   /**
    * Create a new HTTP server for MCP over HTTP
@@ -49,6 +66,7 @@ export class StreamableHttpServer extends BaseTransportServer {
       port: 3000,
       host: "localhost",
       authHeaderName: "x-mcp-token",
+      oauthEnabled: true,
       corsOptions: { origin: "*" },
       rateLimitConfig: { windowMs: 15 * 60 * 1000, maxRequests: 100 },
       requestTimeoutMs: 10000,
@@ -96,6 +114,25 @@ export class StreamableHttpServer extends BaseTransportServer {
       this.app.use(this.rateLimiter.middleware)
     }
 
+    // Configure CORS early so the OAuth discovery endpoints and preflight
+    // requests from browser-based clients are handled before auth kicks in.
+    this.app.use(
+      cors(
+        this.options.corsOptions || {
+          origin: "*",
+          methods: ["GET", "POST", "DELETE"],
+          allowedHeaders: ["Content-Type", "MCP-Session-ID", "Authorization"],
+          exposedHeaders: ["MCP-Session-ID", "WWW-Authenticate"],
+        },
+      ),
+    )
+
+    // Mount the OAuth 2.1 authorization server (public discovery, registration,
+    // authorize and token endpoints) so OAuth-only clients such as Claude's
+    // custom connectors can obtain a bearer token from the shared secret.
+    this.setupOAuth()
+
+    // Authentication for everything except the public endpoints above.
     if (this.options.authToken) {
       this.app.use((req: Request, res: Response, next: NextFunction) => {
         if (req.path === "/health") {
@@ -105,24 +142,42 @@ export class StreamableHttpServer extends BaseTransportServer {
         const headerName = this.options.authHeaderName ?? "x-mcp-token"
         const headerToken = req.header(headerName)
         const authorizationHeader = req.header("authorization")
+        const bearerToken =
+          typeof authorizationHeader === "string" && authorizationHeader.startsWith("Bearer ")
+            ? authorizationHeader.slice(7)
+            : undefined
 
-        const headerTokenValid = this.compareAuthTokens(headerToken)
-        const bearerTokenValid =
-          typeof authorizationHeader === "string" &&
-          authorizationHeader.startsWith("Bearer ") &&
-          this.compareAuthTokens(authorizationHeader.slice(7))
-
-        const hasValidToken = headerTokenValid || bearerTokenValid
-
-        if (!hasValidToken) {
-          return res.status(401).json({
-            error: "Unauthorized",
-            message:
-              "Missing or invalid authentication token. Provide a valid auth header.",
-          })
+        // 1. Backwards-compatible shared-token auth (custom header or raw
+        //    bearer token equal to the shared secret).
+        const staticTokenValid =
+          this.compareAuthTokens(headerToken) ||
+          (bearerToken !== undefined && this.compareAuthTokens(bearerToken))
+        if (staticTokenValid) {
+          return next()
         }
 
-        return next()
+        // 2. OAuth-issued bearer token (used by Claude's custom connectors).
+        if (this.oauthProvider && bearerToken !== undefined) {
+          const authInfo = this.oauthProvider.getValidAccessToken(bearerToken)
+          if (authInfo) {
+            req.auth = authInfo
+            return next()
+          }
+        }
+
+        // Advertise where to discover OAuth so compatible clients can start the
+        // flow, per RFC 9728 (OAuth 2.0 Protected Resource Metadata).
+        if (this.resourceMetadataUrl) {
+          res.setHeader(
+            "WWW-Authenticate",
+            `Bearer resource_metadata="${this.resourceMetadataUrl}"`,
+          )
+        }
+
+        return res.status(401).json({
+          error: "Unauthorized",
+          message: "Missing or invalid authentication token. Provide a valid auth header.",
+        })
       })
     }
 
@@ -145,18 +200,6 @@ export class StreamableHttpServer extends BaseTransportServer {
       res.on("close", () => clearTimeout(timeout))
       next()
     })
-
-    // Configure CORS
-    this.app.use(
-      cors(
-        this.options.corsOptions || {
-          origin: "*",
-          methods: ["GET", "POST", "DELETE"],
-          allowedHeaders: ["Content-Type", "MCP-Session-ID"],
-          exposedHeaders: ["MCP-Session-ID"],
-        },
-      ),
-    )
 
     // Configure JSON body parsing with size limit
     this.app.use(
@@ -225,6 +268,71 @@ export class StreamableHttpServer extends BaseTransportServer {
     }
 
     return timingSafeEqual(provided, expected)
+  }
+
+  /**
+   * Determine the public base URL used as the OAuth issuer. Prefers an
+   * explicitly configured `publicUrl`, otherwise derives one from the
+   * configured host and port (useful for local development).
+   */
+  private resolvePublicBaseUrl(): string {
+    if (this.options.publicUrl) {
+      return this.options.publicUrl.replace(/\/+$/, "")
+    }
+    return `http://${this.host}:${this.port}`
+  }
+
+  /**
+   * Mount the OAuth 2.1 authorization server that wraps the shared token. This
+   * lets OAuth-only clients (notably Claude's custom connectors, which offer no
+   * field for a static bearer token) authenticate: the user proves knowledge of
+   * `authToken` on a login page and receives a standard OAuth bearer token.
+   *
+   * Skipped when there is no shared token or when OAuth is disabled. If a valid
+   * HTTPS issuer URL cannot be formed, OAuth is disabled with an actionable log
+   * message while the shared-token auth continues to work.
+   */
+  private setupOAuth(): void {
+    if (!this.options.authToken || this.options.oauthEnabled === false) {
+      return
+    }
+
+    const baseUrl = this.resolvePublicBaseUrl()
+
+    try {
+      const issuerUrl = new URL(baseUrl)
+      const resourceServerUrl = new URL("/mcp", issuerUrl)
+      const authorizeEndpoint = new URL("/authorize", issuerUrl).href
+
+      const provider = new StaticTokenOAuthProvider({
+        authToken: this.options.authToken,
+        authorizeEndpoint,
+        resource: resourceServerUrl.href,
+        serverName: "MCP Picnic",
+      })
+
+      this.app.use(
+        mcpAuthRouter({
+          provider,
+          issuerUrl,
+          baseUrl: issuerUrl,
+          resourceServerUrl,
+          resourceName: "MCP Picnic",
+        }),
+      )
+
+      this.oauthProvider = provider
+      this.resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(resourceServerUrl)
+
+      console.error(`OAuth authorization server enabled (issuer: ${issuerUrl.href})`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(
+        `OAuth authorization server disabled: ${message}. ` +
+          `Set HTTP_PUBLIC_URL to a public HTTPS URL to enable OAuth for clients such as Claude connectors. ` +
+          `Shared-token authentication remains available.`,
+      )
+    }
   }
 
   /**
