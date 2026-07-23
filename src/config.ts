@@ -22,6 +22,17 @@ const configSchema = z.object({
   HTTP_HOST: z.string().default("localhost"),
   HTTP_AUTH_TOKEN: z.string().optional(),
   HTTP_AUTH_HEADER_NAME: z.string().default("x-mcp-token"),
+  // Enable an OAuth 2.1 wrapper around HTTP_AUTH_TOKEN so clients that only
+  // support OAuth (e.g. Claude's custom connectors) can authenticate. Enabled
+  // by default whenever HTTP_AUTH_TOKEN is set.
+  HTTP_OAUTH_ENABLED: z
+    .string()
+    .transform((val) => val !== "false")
+    .default("true"),
+  // Public HTTPS base URL the server is reachable at (e.g. https://picnic.example.com).
+  // Required for the OAuth flow when the server is reached over anything other
+  // than localhost, because OAuth issuer URLs must be HTTPS.
+  HTTP_PUBLIC_URL: z.string().url().optional(),
   PICNIC_SESSION_FILE: z.string().default(defaultSessionFile),
 })
 
