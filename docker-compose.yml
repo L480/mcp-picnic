@@ -12,6 +12,10 @@ services:
       HTTP_PORT: "3000"
       HTTP_AUTH_TOKEN: ${HTTP_AUTH_TOKEN:?set this in .env}
       HTTP_AUTH_HEADER_NAME: ${HTTP_AUTH_HEADER_NAME:-x-mcp-token}
+      # Public HTTPS URL required for the OAuth flow used by Claude connectors.
+      HTTP_PUBLIC_URL: ${HTTP_PUBLIC_URL:-}
+      # Trust the reverse proxy in front of the container (X-Forwarded-For).
+      HTTP_TRUST_PROXY: ${HTTP_TRUST_PROXY:-1}
       PICNIC_USERNAME: ${PICNIC_USERNAME:?set this in .env}
       PICNIC_PASSWORD: ${PICNIC_PASSWORD:?set this in .env}
       PICNIC_COUNTRY_CODE: ${PICNIC_COUNTRY_CODE:-NL}

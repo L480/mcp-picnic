@@ -403,6 +403,10 @@ HTTP_AUTH_HEADER_NAME=x-mcp-token
 HTTP_PUBLIC_URL=https://picnic.example.com
 # Optional: disable the OAuth wrapper (enabled by default when HTTP_AUTH_TOKEN is set)
 HTTP_OAUTH_ENABLED=true
+# Express "trust proxy" setting. Required when running behind a reverse proxy so
+# client IPs come from X-Forwarded-For and the rate limiter works. Accepts a
+# boolean, a hop count (e.g. 1), or a preset/subnet. Defaults to 1 (first hop).
+HTTP_TRUST_PROXY=1
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json
@@ -470,6 +474,10 @@ Requirements:
   be HTTPS). Set `HTTP_PUBLIC_URL` to that URL, e.g.
   `HTTP_PUBLIC_URL=https://picnic.example.com`. Terminate TLS with a reverse
   proxy (Caddy, nginx, Traefik, …) in front of the server.
+- Because that proxy adds `X-Forwarded-For`, keep `HTTP_TRUST_PROXY` enabled
+  (default `1`). Without it, Express reports the proxy's IP and the rate limiter
+  aborts the OAuth token exchange with `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`,
+  which surfaces in Claude as *"no MCP server was found at the URL"*.
 - Keep `HTTP_AUTH_TOKEN` set to a long random secret – this is the value you
   will enter when connecting.
 

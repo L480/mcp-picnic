@@ -38,6 +38,20 @@ const configSchema = z.object({
   // Required for the OAuth flow when the server is reached over anything other
   // than localhost, because OAuth issuer URLs must be HTTPS.
   HTTP_PUBLIC_URL: z.string().url().optional(),
+  // Express "trust proxy" setting. Required when running behind a reverse proxy
+  // (e.g. nginx/Traefik/Caddy in front of the container) so that client IPs are
+  // read from X-Forwarded-For and the rate limiter does not error. Accepts a
+  // boolean ("true"/"false"), a number of hops ("1"), or a preset/subnet string
+  // ("loopback", "10.0.0.0/8", ...). Defaults to trusting the first hop.
+  HTTP_TRUST_PROXY: z
+    .string()
+    .default("1")
+    .transform((val): boolean | number | string => {
+      if (val === "true") return true
+      if (val === "false" || val === "") return false
+      if (/^\d+$/.test(val)) return parseInt(val, 10)
+      return val
+    }),
   PICNIC_SESSION_FILE: z.string().default(defaultSessionFile),
 })
 

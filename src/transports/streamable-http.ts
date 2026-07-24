@@ -30,6 +30,12 @@ export interface StreamableHttpServerOptions {
    * Used as the OAuth issuer; must be HTTPS unless the host is localhost.
    */
   publicUrl?: string
+  /**
+   * Express `trust proxy` setting. Set when running behind a reverse proxy so
+   * client IPs are derived from `X-Forwarded-For` and the rate limiter works.
+   * Accepts the same values as Express (`true`, hop count, preset/subnet string).
+   */
+  trustProxy?: boolean | number | string
   corsOptions?: cors.CorsOptions
   rateLimitConfig?: RateLimitConfig
   requestTimeoutMs?: number
@@ -92,6 +98,11 @@ export class StreamableHttpServer extends BaseTransportServer {
    * Set up middleware for the Express app
    */
   private setupMiddleware(): void {
+    // Honour X-Forwarded-* headers when running behind a reverse proxy. Without
+    // this, Express reports the proxy's IP and express-rate-limit throws
+    // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR, which breaks the OAuth token endpoint.
+    this.app.set("trust proxy", this.options.trustProxy ?? false)
+
     // Request logging middleware
     if (this.options.enableRequestLogging) {
       this.app.use((req: Request, res: Response, next: NextFunction) => {

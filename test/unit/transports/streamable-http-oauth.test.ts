@@ -87,11 +87,13 @@ describe("StreamableHttpServer OAuth flow", () => {
     } as any)
 
     // publicUrl uses localhost so the SDK accepts the (non-HTTPS) issuer URL.
+    // trustProxy mirrors the containerised-behind-a-reverse-proxy deployment.
     server = new StreamableHttpServer({
       port: 0,
       host: "localhost",
       authToken: "super-secret-token",
       publicUrl: "http://localhost",
+      trustProxy: 1,
       enableRequestLogging: false,
     })
     await server.start()
@@ -252,5 +254,57 @@ describe("StreamableHttpServer OAuth flow", () => {
       headers: { Authorization: "Bearer super-secret-token" },
     })
     expect(res.statusCode).toBe(200)
+  })
+
+  it("handles the token endpoint behind a reverse proxy (X-Forwarded-For)", async () => {
+    // Regression for ERR_ERL_UNEXPECTED_X_FORWARDED_FOR: with trust proxy on,
+    // the SDK rate limiter must not reject forwarded requests during the OAuth
+    // token exchange (which previously broke the flow with a 500).
+    const proxyHeaders = { "X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https" }
+
+    const registerRes = await request("/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...proxyHeaders },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost/callback"],
+        token_endpoint_auth_method: "none",
+      }),
+    })
+    expect(registerRes.statusCode).toBe(201)
+    const client = JSON.parse(registerRes.body)
+
+    const codeVerifier = base64url(randomBytes(32))
+    const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest())
+
+    const authorizeRes = await request("/authorize", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...proxyHeaders },
+      body: form({
+        response_type: "code",
+        client_id: client.client_id,
+        redirect_uri: "http://localhost/callback",
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+        mcp_auth_token: "super-secret-token",
+      }),
+    })
+    expect(authorizeRes.statusCode).toBe(302)
+    const code = new URL(authorizeRes.headers.location as string).searchParams.get("code")
+
+    const tokenRes = await request("/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...proxyHeaders },
+      body: form({
+        grant_type: "authorization_code",
+        code: code!,
+        code_verifier: codeVerifier,
+        client_id: client.client_id,
+        redirect_uri: "http://localhost/callback",
+      }),
+    })
+
+    // Must succeed rather than 500 with a rate-limiter validation error.
+    expect(tokenRes.statusCode).toBe(200)
+    expect(JSON.parse(tokenRes.body).access_token).toBeTruthy()
   })
 })
