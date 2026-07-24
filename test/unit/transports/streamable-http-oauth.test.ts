@@ -256,6 +256,21 @@ describe("StreamableHttpServer OAuth flow", () => {
     expect(res.statusCode).toBe(200)
   })
 
+  it("routes MCP requests posted to the root path (not just /mcp)", async () => {
+    // Claude posts to the exact configured connector URL. When that URL is the
+    // bare host (no /mcp path), the authenticated MCP POST must still be routed
+    // to the MCP handler instead of returning 404.
+    const res = await request("/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer super-secret-token",
+      },
+      body: "{}",
+    })
+    expect(res.statusCode).not.toBe(404)
+  })
+
   it("handles the token endpoint behind a reverse proxy (X-Forwarded-For)", async () => {
     // Regression for ERR_ERL_UNEXPECTED_X_FORWARDED_FOR: with trust proxy on,
     // the SDK rate limiter must not reject forwarded requests during the OAuth

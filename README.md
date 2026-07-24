@@ -483,8 +483,10 @@ Requirements:
 
 How it works:
 
-1. In Claude, add a **Custom Connector** and enter your server URL, e.g.
-   `https://picnic.example.com/mcp`.
+1. In Claude, add a **Custom Connector** and enter your server URL. Both the
+   `/mcp` path and the bare host work, i.e. either
+   `https://picnic.example.com/mcp` or `https://picnic.example.com` – Claude
+   posts to the exact URL you enter, and the server accepts MCP on both.
 2. Claude discovers the OAuth endpoints (`/.well-known/oauth-protected-resource`
    and `/.well-known/oauth-authorization-server`), registers itself and opens a
    login page.

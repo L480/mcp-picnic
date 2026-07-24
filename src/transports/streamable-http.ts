@@ -350,8 +350,10 @@ export class StreamableHttpServer extends BaseTransportServer {
    * Set up the routes for MCP over HTTP
    */
   private setupRoutes(): void {
-    // Handle all MCP requests (POST, GET, DELETE) on a single endpoint
-    this.app.all("/mcp", async (req: Request, res: Response) => {
+    // Handle all MCP requests (POST, GET, DELETE). Served both at "/mcp" and at
+    // the root "/" so the connector works whether the configured server URL
+    // includes the /mcp path or not (Claude posts to the exact configured URL).
+    this.app.all(["/mcp", "/"], async (req: Request, res: Response) => {
       try {
         await this.handleMCPRequest(req, res)
       } catch (error) {
