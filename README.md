@@ -407,6 +407,11 @@ HTTP_OAUTH_ENABLED=true
 # client IPs come from X-Forwarded-For and the rate limiter works. Accepts a
 # boolean, a hop count (e.g. 1), or a preset/subnet. Defaults to 1 (first hop).
 HTTP_TRUST_PROXY=1
+# How long an idle MCP session (the connection Claude keeps to this server) is
+# kept alive before it's cleaned up; refreshed on every request. Defaults to 0,
+# which disables idle expiry entirely so sessions stay open indefinitely. Set
+# this to a positive number of milliseconds to expire idle sessions instead.
+HTTP_SESSION_TIMEOUT_MS=0
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json
@@ -498,6 +503,19 @@ metadata) are served automatically; you do not need to configure them. The
 original shared-token authentication (custom header or `Authorization: Bearer`
 with the raw token) keeps working for Claude Desktop's `mcpServers` config,
 `curl`, and other clients.
+
+**Staying connected**: the OAuth access token Claude receives is valid for 30
+days, independent of the server's uptime. The underlying MCP session (the
+`Mcp-Session-Id` the transport uses per connection) never idles out by
+default (`HTTP_SESSION_TIMEOUT_MS=0`); set it to a positive number of
+milliseconds if you want idle sessions to expire instead. Even when a session
+does expire, an expired session now makes the server return `404`, which
+spec-compliant clients, including Claude, treat as a signal to silently start
+a new session rather than surface a "disconnected" error. If you ever do see
+the connector asking to be reconnected, it most likely means the container
+itself restarted (session state lives in memory) – make sure the container
+isn't being recreated on a schedule and that its logs don't show unexpected
+crashes.
 
 ### MCP Client Configuration
 

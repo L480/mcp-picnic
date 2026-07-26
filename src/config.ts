@@ -52,6 +52,14 @@ const configSchema = z.object({
       if (/^\d+$/.test(val)) return parseInt(val, 10)
       return val
     }),
+  // How long an idle MCP session is kept alive before it is cleaned up
+  // (refreshed on every request). Defaults to "0", which disables idle
+  // expiry and keeps sessions open indefinitely. Set to a positive number of
+  // milliseconds to expire idle sessions instead.
+  HTTP_SESSION_TIMEOUT_MS: z
+    .string()
+    .transform((val) => parseInt(val, 10))
+    .default("0"),
   PICNIC_SESSION_FILE: z.string().default(defaultSessionFile),
 })
 

@@ -410,6 +410,50 @@ describe("StreamableHttpServer", () => {
     expect(sessionsRes.statusCode).toBe(200)
   })
 
+  it("should return 404 (not 400) for an unknown/expired mcp-session-id so clients reconnect automatically", async () => {
+    vi.useRealTimers()
+    server = new StreamableHttpServer({ port: 0, enableRequestLogging: false })
+    await server.start()
+
+    // @ts-expect-error - private property access
+    const httpServer = server.server as http.Server
+    const address = httpServer.address() as { port: number }
+
+    const res = await new Promise<{ statusCode: number; body: any }>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: address.port,
+          path: "/mcp",
+          method: "POST",
+          headers: { "Content-Type": "application/json", "mcp-session-id": "does-not-exist" },
+        },
+        (response) => {
+          let data = ""
+          response.on("data", (chunk: string) => (data += chunk))
+          response.on("end", () => {
+            resolve({ statusCode: response.statusCode!, body: JSON.parse(data) })
+          })
+        },
+      )
+      req.on("error", reject)
+      req.write("{}")
+      req.end()
+    })
+
+    expect(res.statusCode).toBe(404)
+  })
+
+  it("should not schedule idle cleanup when sessionTimeoutMs is 0", () => {
+    server = new StreamableHttpServer({ sessionTimeoutMs: 0, enableRequestLogging: false })
+
+    // @ts-expect-error - private method access
+    server.setupSessionTimeout("some-session-id")
+
+    // @ts-expect-error - private property access
+    expect(server.sessionTimeouts.size).toBe(0)
+  })
+
   it("should not recurse when transport close fires onclose during session cleanup", () => {
     server = new StreamableHttpServer({ enableRequestLogging: false })
     const sessionId = "regression-session"

@@ -42,6 +42,13 @@ export interface StreamableHttpServerOptions {
   maxRequestSizeBytes?: number
   enableRequestLogging?: boolean
   maxConcurrentSessions?: number
+  /**
+   * How long an idle MCP session is kept alive before it is cleaned up.
+   * Refreshed on every request the session receives. Defaults to `0`, which
+   * disables idle expiry entirely and keeps sessions open indefinitely
+   * (until the client disconnects or the process restarts). Set to a
+   * positive number of milliseconds to expire idle sessions instead.
+   */
   sessionTimeoutMs?: number
 }
 
@@ -79,7 +86,7 @@ export class StreamableHttpServer extends BaseTransportServer {
       maxRequestSizeBytes: 1024 * 1024 * 10, // 10MB
       enableRequestLogging: true,
       maxConcurrentSessions: 100,
-      sessionTimeoutMs: 30 * 60 * 1000, // 30 minutes
+      sessionTimeoutMs: 0, // disabled: sessions stay open indefinitely by default
       ...options,
     }
     this.app = express()
@@ -359,8 +366,12 @@ export class StreamableHttpServer extends BaseTransportServer {
       } catch (error) {
         ErrorUtils.logError(error, "MCP Request Handler")
         if (!res.headersSent) {
+          // Use the error's own status code (e.g. 404 for an expired session)
+          // instead of always answering 500 - clients rely on the specific
+          // code to decide whether to retry, re-initialize, or give up.
+          const statusCode = ErrorUtils.isMCPError(error) ? error.statusCode : 500
           const errorResponse = ErrorUtils.createSafeErrorResponse(error)
-          res.status(500).json({
+          res.status(statusCode).json({
             jsonrpc: "2.0",
             error: errorResponse,
             id: null,
@@ -461,7 +472,11 @@ export class StreamableHttpServer extends BaseTransportServer {
       }
       const transport = this.getTransport(sessionId)
       if (!transport) {
-        throw new TransportError(ErrorCode.TRANSPORT_INVALID_SESSION, "Invalid session ID")
+        // A 404 (rather than 400) tells spec-compliant MCP clients, including
+        // Claude's connector, that the session is gone and they should silently
+        // re-initialize a new one instead of surfacing a hard "disconnected"
+        // error that requires the user to manually reconnect the integration.
+        throw new TransportError(ErrorCode.TRANSPORT_SESSION_EXPIRED, "Session not found or expired")
       }
       this.refreshSessionTimeout(sessionId)
       await transport.handleRequest(req, res, req.body)
@@ -480,7 +495,7 @@ export class StreamableHttpServer extends BaseTransportServer {
 
     const transport = this.getTransport(sessionId)
     if (!transport) {
-      throw new TransportError(ErrorCode.TRANSPORT_INVALID_SESSION, "Invalid session ID")
+      throw new TransportError(ErrorCode.TRANSPORT_SESSION_EXPIRED, "Session not found or expired")
     }
 
     this.refreshSessionTimeout(sessionId)
@@ -499,7 +514,7 @@ export class StreamableHttpServer extends BaseTransportServer {
 
     const transport = this.getTransport(sessionId)
     if (!transport) {
-      throw new TransportError(ErrorCode.TRANSPORT_INVALID_SESSION, "Invalid session ID")
+      throw new TransportError(ErrorCode.TRANSPORT_SESSION_EXPIRED, "Session not found or expired")
     }
 
     await transport.handleRequest(req, res, req.body)
@@ -622,6 +637,11 @@ export class StreamableHttpServer extends BaseTransportServer {
   }
 
   private setupSessionTimeout(sessionId: string): void {
+    // A timeout of 0 (or less) disables idle expiry: the session stays open
+    // until the client disconnects or the process restarts.
+    if (!this.options.sessionTimeoutMs || this.options.sessionTimeoutMs <= 0) {
+      return
+    }
     const timeout = setTimeout(() => {
       this.cleanupSession(sessionId)
     }, this.options.sessionTimeoutMs)
