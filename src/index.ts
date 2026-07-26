@@ -22,6 +22,7 @@ async function runServer() {
       oauthEnabled: config.HTTP_OAUTH_ENABLED,
       publicUrl: config.HTTP_PUBLIC_URL,
       trustProxy: config.HTTP_TRUST_PROXY,
+      sessionTimeoutMs: config.HTTP_SESSION_TIMEOUT_MS,
     })
 
     // Handle graceful shutdown for HTTP server
