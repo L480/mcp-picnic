@@ -44,9 +44,10 @@ export interface StreamableHttpServerOptions {
   maxConcurrentSessions?: number
   /**
    * How long an idle MCP session is kept alive before it is cleaned up.
-   * Refreshed on every request the session receives. Set to `0` to disable
-   * idle expiry entirely and keep sessions open indefinitely (until the
-   * client disconnects or the process restarts). Defaults to 12 hours.
+   * Refreshed on every request the session receives. Defaults to `0`, which
+   * disables idle expiry entirely and keeps sessions open indefinitely
+   * (until the client disconnects or the process restarts). Set to a
+   * positive number of milliseconds to expire idle sessions instead.
    */
   sessionTimeoutMs?: number
 }
@@ -85,7 +86,7 @@ export class StreamableHttpServer extends BaseTransportServer {
       maxRequestSizeBytes: 1024 * 1024 * 10, // 10MB
       enableRequestLogging: true,
       maxConcurrentSessions: 100,
-      sessionTimeoutMs: 12 * 60 * 60 * 1000, // 12 hours
+      sessionTimeoutMs: 0, // disabled: sessions stay open indefinitely by default
       ...options,
     }
     this.app = express()

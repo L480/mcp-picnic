@@ -408,12 +408,10 @@ HTTP_OAUTH_ENABLED=true
 # boolean, a hop count (e.g. 1), or a preset/subnet. Defaults to 1 (first hop).
 HTTP_TRUST_PROXY=1
 # How long an idle MCP session (the connection Claude keeps to this server) is
-# kept alive before it's cleaned up; refreshed on every request. Defaults to
-# 12 hours. Set to 0 to disable idle expiry entirely, keeping sessions open
-# indefinitely. Note: even without this, an expired session is reconnected
-# transparently by spec-compliant clients (including Claude) — you shouldn't
-# need to touch this unless a client doesn't reconnect on its own.
-HTTP_SESSION_TIMEOUT_MS=43200000
+# kept alive before it's cleaned up; refreshed on every request. Defaults to 0,
+# which disables idle expiry entirely so sessions stay open indefinitely. Set
+# this to a positive number of milliseconds to expire idle sessions instead.
+HTTP_SESSION_TIMEOUT_MS=0
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json
@@ -508,15 +506,16 @@ with the raw token) keeps working for Claude Desktop's `mcpServers` config,
 
 **Staying connected**: the OAuth access token Claude receives is valid for 30
 days, independent of the server's uptime. The underlying MCP session (the
-`Mcp-Session-Id` the transport uses per connection) idles out after
-`HTTP_SESSION_TIMEOUT_MS` (12 hours by default, configurable, or `0` to never
-expire) – but that's not something you normally need to work around: an
-expired session now makes the server return `404`, which spec-compliant
-clients, including Claude, treat as a signal to silently start a new session
-rather than surface a "disconnected" error. If you ever do see the connector
-asking to be reconnected, it most likely means the container itself restarted
-(session state lives in memory) – make sure the container isn't being
-recreated on a schedule and that its logs don't show unexpected crashes.
+`Mcp-Session-Id` the transport uses per connection) never idles out by
+default (`HTTP_SESSION_TIMEOUT_MS=0`); set it to a positive number of
+milliseconds if you want idle sessions to expire instead. Even when a session
+does expire, an expired session now makes the server return `404`, which
+spec-compliant clients, including Claude, treat as a signal to silently start
+a new session rather than surface a "disconnected" error. If you ever do see
+the connector asking to be reconnected, it most likely means the container
+itself restarted (session state lives in memory) – make sure the container
+isn't being recreated on a schedule and that its logs don't show unexpected
+crashes.
 
 ### MCP Client Configuration
 
