@@ -31,11 +31,13 @@ RUN addgroup -S -g ${APP_UID} mcp \
   && mkdir -p /app/data \
   && chown -R mcp:mcp /app
 
-# Default session and device-id locations inside the container (can be
-# overridden). Both live on the persisted /app/data volume so the generated
-# device id survives container restarts instead of being regenerated each run.
+# Default session, device-id and OAuth state locations inside the container
+# (can be overridden). All three live on the persisted /app/data volume so
+# the Picnic session, generated device id, and Claude connector's OAuth
+# clients/tokens survive container restarts instead of forcing a fresh login.
 ENV PICNIC_SESSION_FILE=/app/data/picnic-session.json
 ENV PICNIC_DEVICE_FILE=/app/data/picnic-device.json
+ENV HTTP_OAUTH_STATE_FILE=/app/data/oauth-state.json
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

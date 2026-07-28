@@ -7,6 +7,7 @@ dotenv.config()
 
 const defaultSessionFile = path.join(os.homedir(), ".picnic-session.json")
 const defaultDeviceFile = path.join(os.homedir(), ".picnic-device.json")
+const defaultOAuthStateFile = path.join(os.homedir(), ".picnic-oauth-state.json")
 
 const configSchema = z.object({
   PICNIC_USERNAME: z.string(),
@@ -38,6 +39,11 @@ const configSchema = z.object({
   // Required for the OAuth flow when the server is reached over anything other
   // than localhost, because OAuth issuer URLs must be HTTPS.
   HTTP_PUBLIC_URL: z.string().url().optional(),
+  // Where the OAuth 2.1 wrapper persists registered clients and issued
+  // access/refresh tokens, so Claude's custom connector stays authenticated
+  // across server restarts instead of needing to reconnect every time the
+  // container is recreated (e.g. a nightly restart).
+  HTTP_OAUTH_STATE_FILE: z.string().default(defaultOAuthStateFile),
   // Express "trust proxy" setting. Required when running behind a reverse proxy
   // (e.g. nginx/Traefik/Caddy in front of the container) so that client IPs are
   // read from X-Forwarded-For and the rate limiter does not error. Accepts a

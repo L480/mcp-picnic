@@ -1,5 +1,6 @@
 import { Response } from "express"
 import { randomUUID, randomBytes, timingSafeEqual } from "crypto"
+import fs from "fs"
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js"
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js"
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js"
@@ -26,6 +27,22 @@ export interface StaticTokenOAuthOptions {
   authorizationCodeTtlSeconds?: number
   /** Human readable name displayed on the login page. */
   serverName?: string
+  /**
+   * Path to a file where registered clients and issued tokens are persisted.
+   * When set, state is loaded on startup and saved after every change, so
+   * Claude's connector stays authenticated across process restarts instead of
+   * needing to redo the OAuth flow every time the container is recreated.
+   * Authorization codes are intentionally not persisted: they are single-use
+   * and short-lived (a few minutes), so any in-flight login started right
+   * before a restart simply has to be retried.
+   */
+  stateFile?: string
+}
+
+interface PersistedState {
+  clients: [string, OAuthClientInformationFull][]
+  accessTokens: [string, AuthInfo][]
+  refreshTokens: [string, StoredRefreshToken][]
 }
 
 interface StoredAuthorizationCode {
@@ -81,6 +98,7 @@ export class StaticTokenOAuthProvider implements OAuthServerProvider {
   private readonly accessTokenTtlSeconds: number
   private readonly authorizationCodeTtlSeconds: number
   private readonly serverName: string
+  private readonly stateFile?: string
 
   private readonly clients = new Map<string, OAuthClientInformationFull>()
   private readonly authorizationCodes = new Map<string, StoredAuthorizationCode>()
@@ -95,6 +113,8 @@ export class StaticTokenOAuthProvider implements OAuthServerProvider {
     this.accessTokenTtlSeconds = options.accessTokenTtlSeconds ?? 30 * 24 * 60 * 60
     this.authorizationCodeTtlSeconds = options.authorizationCodeTtlSeconds ?? 5 * 60
     this.serverName = options.serverName ?? "MCP Picnic"
+    this.stateFile = options.stateFile
+    this.loadState()
   }
 
   public readonly clientsStore: OAuthRegisteredClientsStore = {
@@ -107,8 +127,79 @@ export class StaticTokenOAuthProvider implements OAuthServerProvider {
         client_id_issued_at: Math.floor(Date.now() / 1000),
       }
       this.clients.set(clientId, full)
+      this.persistState()
       return full
     },
+  }
+
+  /**
+   * Loads previously persisted clients and tokens from `stateFile`, if
+   * configured. Reads synchronously so state is available before the server
+   * starts accepting requests. Missing or corrupt files are treated as "no
+   * prior state" rather than a fatal error.
+   */
+  private loadState(): void {
+    if (!this.stateFile) {
+      return
+    }
+
+    let raw: string
+    try {
+      raw = fs.readFileSync(this.stateFile, "utf-8")
+    } catch {
+      return
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<PersistedState>
+      const now = Math.floor(Date.now() / 1000)
+
+      for (const [clientId, client] of parsed.clients ?? []) {
+        this.clients.set(clientId, client)
+      }
+      for (const [token, authInfo] of parsed.accessTokens ?? []) {
+        if (authInfo.expiresAt !== undefined && authInfo.expiresAt < now) {
+          continue
+        }
+        this.accessTokens.set(token, {
+          ...authInfo,
+          resource: authInfo.resource ? new URL(authInfo.resource as unknown as string) : undefined,
+        })
+      }
+      for (const [token, refreshToken] of parsed.refreshTokens ?? []) {
+        this.refreshTokens.set(token, refreshToken)
+      }
+      console.error(
+        `Restored OAuth state from ${this.stateFile} (${this.clients.size} client(s), ${this.accessTokens.size} access token(s)).`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`Ignoring unreadable OAuth state file ${this.stateFile}: ${message}`)
+    }
+  }
+
+  /**
+   * Persists clients and tokens to `stateFile`, if configured. Best-effort:
+   * a write failure is logged but never surfaced to the caller, since losing
+   * persistence should not break the OAuth flow that just succeeded in memory.
+   */
+  private persistState(): void {
+    if (!this.stateFile) {
+      return
+    }
+
+    const state: PersistedState = {
+      clients: Array.from(this.clients.entries()),
+      accessTokens: Array.from(this.accessTokens.entries()),
+      refreshTokens: Array.from(this.refreshTokens.entries()),
+    }
+
+    try {
+      fs.writeFileSync(this.stateFile, JSON.stringify(state))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`Failed to persist OAuth state to ${this.stateFile}: ${message}`)
+    }
   }
 
   /**
@@ -303,6 +394,7 @@ export class StaticTokenOAuthProvider implements OAuthServerProvider {
       resource: resource ? new URL(resource) : this.resource ? new URL(this.resource) : undefined,
     })
     this.refreshTokens.set(refreshToken, { clientId, scopes, resource })
+    this.persistState()
 
     return {
       access_token: accessToken,
@@ -352,5 +444,6 @@ export class StaticTokenOAuthProvider implements OAuthServerProvider {
     }
     this.accessTokens.delete(request.token)
     this.refreshTokens.delete(request.token)
+    this.persistState()
   }
 }
