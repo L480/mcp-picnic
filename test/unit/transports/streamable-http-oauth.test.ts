@@ -1,4 +1,7 @@
 import http from "http"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { createHash, randomBytes } from "crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { StreamableHttpServer } from "../../../src/transports/streamable-http"
@@ -321,5 +324,155 @@ describe("StreamableHttpServer OAuth flow", () => {
     // Must succeed rather than 500 with a rate-limiter validation error.
     expect(tokenRes.statusCode).toBe(200)
     expect(JSON.parse(tokenRes.body).access_token).toBeTruthy()
+  })
+})
+
+describe("StreamableHttpServer OAuth state persistence across restarts", () => {
+  let stateFile: string
+
+  const request = (
+    port: number,
+    path: string,
+    options: {
+      method?: string
+      headers?: Record<string, string>
+      body?: string
+    } = {},
+  ): Promise<HttpResult> =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path,
+          method: options.method ?? "GET",
+          headers: options.headers,
+        },
+        (response) => {
+          let data = ""
+          response.on("data", (chunk) => (data += chunk))
+          response.on("end", () =>
+            resolve({ statusCode: response.statusCode!, headers: response.headers, body: data }),
+          )
+        },
+      )
+      req.on("error", reject)
+      if (options.body !== undefined) {
+        req.write(options.body)
+      }
+      req.end()
+    })
+
+  const form = (data: Record<string, string>): string =>
+    Object.entries(data)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join("&")
+
+  const startServer = async (): Promise<{ server: StreamableHttpServer; port: number }> => {
+    vi.mocked(createMCPServer).mockReturnValue({
+      server: { setRequestHandler: vi.fn(), connect: vi.fn().mockResolvedValue(undefined) },
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as any)
+
+    const server = new StreamableHttpServer({
+      port: 0,
+      host: "localhost",
+      authToken: "super-secret-token",
+      publicUrl: "http://localhost",
+      trustProxy: 1,
+      enableRequestLogging: false,
+      oauthStateFile: stateFile,
+    })
+    await server.start()
+    // @ts-expect-error - private property access for test
+    const httpServer = server.server as http.Server
+    const port = (httpServer.address() as { port: number }).port
+    return { server, port }
+  }
+
+  beforeEach(() => {
+    stateFile = path.join(os.tmpdir(), `mcp-picnic-oauth-state-${randomBytes(8).toString("hex")}.json`)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    fs.rmSync(stateFile, { force: true })
+  })
+
+  it("keeps a previously issued access token valid after the server restarts", async () => {
+    const { server: server1, port: port1 } = await startServer()
+
+    const registerRes = await request(port1, "/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost/callback"],
+        token_endpoint_auth_method: "none",
+        client_name: "Test Connector",
+      }),
+    })
+    const client = JSON.parse(registerRes.body)
+
+    const codeVerifier = base64url(randomBytes(32))
+    const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest())
+
+    const authorizeRes = await request(port1, "/authorize", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({
+        response_type: "code",
+        client_id: client.client_id,
+        redirect_uri: "http://localhost/callback",
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+        mcp_auth_token: "super-secret-token",
+      }),
+    })
+    const code = new URL(authorizeRes.headers.location as string).searchParams.get("code")
+
+    const tokenRes = await request(port1, "/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({
+        grant_type: "authorization_code",
+        code: code!,
+        code_verifier: codeVerifier,
+        client_id: client.client_id,
+        redirect_uri: "http://localhost/callback",
+      }),
+    })
+    const tokens = JSON.parse(tokenRes.body)
+    expect(tokens.access_token).toBeTruthy()
+
+    // Simulate the container being recreated: stop the first server (state
+    // stays in the file, not in memory) and start a brand new instance
+    // pointed at the same state file.
+    await server1.stop()
+    const { server: server2, port: port2 } = await startServer()
+
+    try {
+      // No re-authorization here: the token issued by server1 must still work.
+      const protectedRes = await request(port2, "/sessions", {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      })
+      expect(protectedRes.statusCode).toBe(200)
+
+      // The refresh token must also still be usable, which requires the
+      // originally registered client to have survived the restart too.
+      const refreshRes = await request(port2, "/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form({
+          grant_type: "refresh_token",
+          refresh_token: tokens.refresh_token,
+          client_id: client.client_id,
+        }),
+      })
+      expect(refreshRes.statusCode).toBe(200)
+      expect(JSON.parse(refreshRes.body).access_token).toBeTruthy()
+    } finally {
+      await server2.stop()
+    }
   })
 })

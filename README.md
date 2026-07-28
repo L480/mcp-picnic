@@ -358,6 +358,7 @@ Notes:
 - Session persistence is configured via volume `picnic-data` mapped to `/app/data`.
 - `PICNIC_SESSION_FILE` defaults to `/app/data/picnic-session.json` in the container.
 - `PICNIC_DEVICE_FILE` defaults to `/app/data/picnic-device.json` in the container, so a generated device id is persisted on the same volume and reused across restarts.
+- `HTTP_OAUTH_STATE_FILE` defaults to `/app/data/oauth-state.json` in the container, so Claude's custom connector stays authenticated (no re-login) across restarts. See [Staying connected](#using-the-server-as-a-claude-custom-connector-oauth) below.
 
 ### Configuration
 
@@ -415,6 +416,10 @@ HTTP_SESSION_TIMEOUT_MS=0
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json
+# OAuth state persistence (optional, strongly recommended in containers): keeps
+# Claude's custom connector authenticated across restarts. Defaults to
+# /app/data/oauth-state.json in the Docker image (on the picnic-data volume).
+HTTP_OAUTH_STATE_FILE=~/.picnic-oauth-state.json
 
 # Picnic API settings (optional)
 PICNIC_API_VERSION=15
@@ -511,11 +516,17 @@ default (`HTTP_SESSION_TIMEOUT_MS=0`); set it to a positive number of
 milliseconds if you want idle sessions to expire instead. Even when a session
 does expire, an expired session now makes the server return `404`, which
 spec-compliant clients, including Claude, treat as a signal to silently start
-a new session rather than surface a "disconnected" error. If you ever do see
-the connector asking to be reconnected, it most likely means the container
-itself restarted (session state lives in memory) – make sure the container
-isn't being recreated on a schedule and that its logs don't show unexpected
-crashes.
+a new session rather than surface a "disconnected" error.
+
+Registered OAuth clients and issued access/refresh tokens are persisted to
+`HTTP_OAUTH_STATE_FILE` (defaults to `/app/data/oauth-state.json` in the
+Docker image, on the `picnic-data` volume) and reloaded on startup. This
+means a container restart – scheduled or crash-induced – no longer forces
+Claude to reconnect: as long as that file survives the restart (i.e. it lives
+on a persisted volume, not the container's writable layer), the previously
+issued token keeps working. If you ever do see the connector asking to be
+reconnected after a restart, check that `HTTP_OAUTH_STATE_FILE` points at a
+path on a volume that outlives the container.
 
 ### MCP Client Configuration
 

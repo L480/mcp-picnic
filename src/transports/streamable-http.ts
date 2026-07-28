@@ -31,6 +31,13 @@ export interface StreamableHttpServerOptions {
    */
   publicUrl?: string
   /**
+   * Path to a file where the OAuth provider persists registered clients and
+   * issued tokens, so Claude's custom connector stays authenticated across
+   * server restarts. Omit to keep OAuth state in memory only (the client will
+   * have to redo the OAuth flow whenever the process restarts).
+   */
+  oauthStateFile?: string
+  /**
    * Express `trust proxy` setting. Set when running behind a reverse proxy so
    * client IPs are derived from `X-Forwarded-For` and the rate limiter works.
    * Accepts the same values as Express (`true`, hop count, preset/subnet string).
@@ -327,6 +334,7 @@ export class StreamableHttpServer extends BaseTransportServer {
         authorizeEndpoint,
         resource: resourceServerUrl.href,
         serverName: "MCP Picnic",
+        stateFile: this.options.oauthStateFile,
       })
 
       this.app.use(
