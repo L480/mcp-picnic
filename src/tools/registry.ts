@@ -2,6 +2,18 @@ import { z } from "zod"
 import { zodToJsonSchema } from "zod-to-json-schema"
 import { ToolError, ErrorCode, ErrorUtils } from "../types/errors.js"
 
+/**
+ * MCP tool annotations. Hints for the calling model about a tool's side effects —
+ * most importantly whether it is safe to retry after an ambiguous failure.
+ */
+export interface ToolAnnotations {
+  title?: string
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
+}
+
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   name: string
   description: string
@@ -9,6 +21,7 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   outputSchema?: z.ZodSchema<TOutput>
   handler: (args: TInput) => Promise<TOutput>
   prompts?: string[]
+  annotations?: ToolAnnotations
 }
 
 export interface ToolResult {
@@ -21,6 +34,33 @@ export interface ToolResult {
   isError?: boolean
 }
 
+/**
+ * Marker for handlers that emit MCP content blocks directly.
+ *
+ * Every other handler return value is JSON-serialized into a single `text` block, which is
+ * correct for data but destroys binary payloads — an ArrayBuffer stringifies to `{}`. A
+ * handler wrapping its blocks in `mcpContent()` has them passed through to the client
+ * untouched, so an image arrives as renderable image content rather than a JSON string.
+ */
+const MCP_CONTENT = Symbol("mcpContent")
+
+interface McpContentResult {
+  [MCP_CONTENT]: true
+  content: ToolResult["content"]
+}
+
+export function mcpContent(content: ToolResult["content"]): McpContentResult {
+  return { [MCP_CONTENT]: true, content }
+}
+
+function isMcpContent(value: unknown): value is McpContentResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[MCP_CONTENT] === true
+  )
+}
+
 // Type-erased version for storage
 interface StoredToolDefinition {
   name: string
@@ -29,6 +69,7 @@ interface StoredToolDefinition {
   outputSchema?: z.ZodSchema<unknown>
   handler: (args: unknown) => Promise<unknown>
   prompts?: string[]
+  annotations?: ToolAnnotations
 }
 
 class ToolRegistry {
@@ -45,6 +86,7 @@ class ToolRegistry {
         name: tool.name,
         description: tool.description,
         inputSchema: zodToJsonSchema(tool.inputSchema),
+        ...(tool.annotations && { annotations: tool.annotations }),
       }
     }
     return definitions
@@ -55,6 +97,7 @@ class ToolRegistry {
       name: tool.name,
       description: tool.description,
       inputSchema: zodToJsonSchema(tool.inputSchema),
+      ...(tool.annotations && { annotations: tool.annotations }),
     }))
   }
 
@@ -107,6 +150,12 @@ class ToolRegistry {
             args: validatedArgs,
           },
         )
+      }
+
+      // Content blocks are already the wire format, so they skip output validation and
+      // JSON formatting rather than being serialized like a data payload.
+      if (isMcpContent(result)) {
+        return { content: result.content }
       }
 
       // Validate output if schema is provided
