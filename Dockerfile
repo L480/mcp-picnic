@@ -21,6 +21,17 @@ ARG APP_UID=1638
 COPY package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts
 
+# npm/npx/yarn/corepack are never used at runtime; their bundled deps are what Trivy flags.
+RUN rm -rf \
+  /usr/local/lib/node_modules/npm \
+  /usr/local/lib/node_modules/corepack \
+  /usr/local/bin/npm \
+  /usr/local/bin/npx \
+  /usr/local/bin/corepack \
+  /usr/local/bin/yarn \
+  /usr/local/bin/yarnpkg \
+  /opt/yarn-v1.22.22
+
 # Copy production artifacts
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/bin ./bin
