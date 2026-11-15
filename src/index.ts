@@ -24,6 +24,12 @@ async function runServer() {
       oauthStateFile: config.HTTP_OAUTH_STATE_FILE,
       trustProxy: config.HTTP_TRUST_PROXY,
       sessionTimeoutMs: config.HTTP_SESSION_TIMEOUT_MS,
+      rateLimitConfig: {
+        windowMs: config.HTTP_RATE_LIMIT_WINDOW_MS,
+        maxRequests: config.HTTP_RATE_LIMIT_MAX_REQUESTS,
+        maxRequestsPerIp: config.HTTP_RATE_LIMIT_MAX_REQUESTS_PER_IP,
+        skipPaths: config.HTTP_RATE_LIMIT_SKIP_PATHS,
+      },
     })
 
     // Handle graceful shutdown for HTTP server

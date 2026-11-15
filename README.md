@@ -28,7 +28,7 @@ MCP Picnic is a bridge between AI assistants (like Claude, ChatGPT, or other MCP
 ### 🤖 AI-Powered Shopping Tools
 
 - **Product Search**: Find any product in Picnic's catalog
-- **Weekly Promotions**: Fetch current Picnic deals from the app's "Alle acties" page
+- **Weekly Promotions**: Fetch current Picnic deals from the app's promotions page
 - **Cart Management**: Add, remove, and modify items in your shopping cart
 - **Order Tracking**: Monitor delivery status and driver location
 - **Account Management**: Access your profile, payment methods, and order history
@@ -405,14 +405,27 @@ HTTP_PUBLIC_URL=https://picnic.example.com
 # Optional: disable the OAuth wrapper (enabled by default when HTTP_AUTH_TOKEN is set)
 HTTP_OAUTH_ENABLED=true
 # Express "trust proxy" setting. Required when running behind a reverse proxy so
-# client IPs come from X-Forwarded-For and the rate limiter works. Accepts a
-# boolean, a hop count (e.g. 1), or a preset/subnet. Defaults to 1 (first hop).
+# client IPs come from X-Forwarded-For and the rate limiter works per client.
+# Accepts true/false, a hop count (e.g. 1), or a comma-separated list of
+# addresses/subnets (e.g. loopback, 10.0.0.0/8). Defaults to 1 (first hop).
+# A hop count or "true" trusts X-Forwarded-For from anyone who reaches the port
+# directly, letting them spoof their IP; only use those when the port is reachable
+# solely through the proxy. Set to "false" to trust no proxy.
 HTTP_TRUST_PROXY=1
 # How long an idle MCP session (the connection Claude keeps to this server) is
 # kept alive before it's cleaned up; refreshed on every request. Defaults to 0,
 # which disables idle expiry entirely so sessions stay open indefinitely. Set
 # this to a positive number of milliseconds to expire idle sessions instead.
 HTTP_SESSION_TIMEOUT_MS=0
+# Rate limiting for downstream HTTP consumers (defaults shown)
+HTTP_RATE_LIMIT_WINDOW_MS=900000
+HTTP_RATE_LIMIT_MAX_REQUESTS=100
+# Comma-separated paths excluded from the rate limiter
+HTTP_RATE_LIMIT_SKIP_PATHS=/health
+# Each MCP session gets its own HTTP_RATE_LIMIT_MAX_REQUESTS bucket (only for authorized
+# requests from the IP that created the session); other requests share their client IP's.
+# Admitted requests from one client IP are also capped in total (default: 10x MAX_REQUESTS).
+# HTTP_RATE_LIMIT_MAX_REQUESTS_PER_IP=1000
 
 # Session persistence (optional, strongly recommended in containers)
 PICNIC_SESSION_FILE=~/.picnic-session.json

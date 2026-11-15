@@ -2,6 +2,7 @@ import { z } from "zod"
 import path from "path"
 import os from "os"
 import dotenv from "dotenv"
+import { isValidTrustProxy, parseTrustProxy } from "./utils/trust-proxy.js"
 
 dotenv.config()
 
@@ -46,18 +47,14 @@ const configSchema = z.object({
   HTTP_OAUTH_STATE_FILE: z.string().default(defaultOAuthStateFile),
   // Express "trust proxy" setting. Required when running behind a reverse proxy
   // (e.g. nginx/Traefik/Caddy in front of the container) so that client IPs are
-  // read from X-Forwarded-For and the rate limiter does not error. Accepts a
-  // boolean ("true"/"false"), a number of hops ("1"), or a preset/subnet string
-  // ("loopback", "10.0.0.0/8", ...). Defaults to trusting the first hop.
-  HTTP_TRUST_PROXY: z
-    .string()
-    .default("1")
-    .transform((val): boolean | number | string => {
-      if (val === "true") return true
-      if (val === "false" || val === "") return false
-      if (/^\d+$/.test(val)) return parseInt(val, 10)
-      return val
-    }),
+  // read from X-Forwarded-For and the rate limiter works per client. Accepts a
+  // boolean ("true"/"false"), a number of hops ("1"), or a comma-separated list
+  // of addresses/subnets ("loopback", "10.0.0.0/8", ...). Defaults to trusting
+  // the first hop; set to "" or "false" to trust no proxy.
+  HTTP_TRUST_PROXY: z.string().default("1").transform(parseTrustProxy).refine(isValidTrustProxy, {
+    message:
+      "HTTP_TRUST_PROXY must be true, false, a hop count, or a comma-separated list of addresses/subnets (e.g. loopback).",
+  }),
   // How long an idle MCP session is kept alive before it is cleaned up
   // (refreshed on every request). Defaults to "0", which disables idle
   // expiry and keeps sessions open indefinitely. Set to a positive number of
@@ -66,6 +63,25 @@ const configSchema = z.object({
     .string()
     .transform((val) => parseInt(val, 10))
     .default("0"),
+  HTTP_RATE_LIMIT_WINDOW_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(15 * 60 * 1000),
+  HTTP_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
+  HTTP_RATE_LIMIT_SKIP_PATHS: z
+    .string()
+    .default("/health")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((path) => path.trim())
+        .filter(Boolean),
+    )
+    .refine((paths) => paths.every((path) => path.startsWith("/")), {
+      message: "HTTP_RATE_LIMIT_SKIP_PATHS entries must start with '/'.",
+    }),
+  HTTP_RATE_LIMIT_MAX_REQUESTS_PER_IP: z.coerce.number().int().positive().optional(),
   PICNIC_SESSION_FILE: z.string().default(defaultSessionFile),
 })
 
