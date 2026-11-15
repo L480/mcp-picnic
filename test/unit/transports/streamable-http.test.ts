@@ -221,6 +221,20 @@ describe("StreamableHttpServer", () => {
     ])
   })
 
+  it("should keep the /health exemption when a custom rate limit config omits skipPaths", () => {
+    server = new StreamableHttpServer({ rateLimitConfig: { windowMs: 60000, maxRequests: 1 } })
+    // @ts-expect-error - private property access
+    expect(server.options.rateLimitConfig.skipPaths).toEqual(["/health"])
+  })
+
+  it("should honour an explicitly empty skipPaths list", () => {
+    server = new StreamableHttpServer({
+      rateLimitConfig: { windowMs: 60000, maxRequests: 1, skipPaths: [] },
+    })
+    // @ts-expect-error - private property access
+    expect(server.options.rateLimitConfig.skipPaths).toEqual([])
+  })
+
   describe("rate limit identity", () => {
     const get = (port: number, headers: Record<string, string> = {}) =>
       new Promise<number>((resolve, reject) => {

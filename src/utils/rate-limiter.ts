@@ -112,10 +112,19 @@ export class RateLimiter {
 
   /**
    * Undo one counted request in the current window, for requests rejected after being counted.
+   *
+   * @param chargedResetTime `resetTime` of the window the request was counted in. When given,
+   *   the refund is skipped if that window has since ended, so a late refund can't free quota in
+   *   a newer window.
    */
-  refund(identifier: string): void {
+  refund(identifier: string, chargedResetTime?: number): void {
     const entry = this.store.get(this.config.keyGenerator(identifier))
-    if (entry && Date.now() < entry.resetTime && entry.count > 0) {
+    if (
+      entry &&
+      Date.now() < entry.resetTime &&
+      entry.count > 0 &&
+      (chargedResetTime === undefined || entry.resetTime === chargedResetTime)
+    ) {
       entry.count--
     }
   }
@@ -307,11 +316,16 @@ export function createRateLimitMiddleware(config: RateLimitConfig) {
       if (!result.allowed) {
         return reject(res, config.maxRequests, result.resetTime)
       }
-      ipLimiter.checkLimit(ipKey)
+      const ipResult = ipLimiter.checkLimit(ipKey)
       if (sessionId) {
-        // Lets handlers tell this request was charged to a session, not its IP.
+        // Lets handlers tell this request was charged to a session, not its IP, and which
+        // windows were charged, so a later refund only undoes those charges.
         res.locals = res.locals ?? {}
         res.locals.rateLimitSessionId = sessionId
+        res.locals.rateLimitCharge = {
+          sessionResetTime: result.resetTime,
+          ipResetTime: ipResult.resetTime,
+        }
       }
 
       res.set({
@@ -334,10 +348,11 @@ export function createRateLimitMiddleware(config: RateLimitConfig) {
       const result = limiter.checkLimit(ipKey)
       if (!result.allowed) {
         const sessionId = res.locals?.rateLimitSessionId
+        const charge = res.locals?.rateLimitCharge
         if (sessionId) {
-          limiter.refund(`session:${sessionId}`)
+          limiter.refund(`session:${sessionId}`, charge?.sessionResetTime)
         }
-        ipLimiter.refund(ipKey)
+        ipLimiter.refund(ipKey, charge?.ipResetTime)
         reject(res, config.maxRequests, result.resetTime)
         return false
       }

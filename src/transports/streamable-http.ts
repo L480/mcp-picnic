@@ -101,6 +101,11 @@ export class StreamableHttpServer extends BaseTransportServer {
       sessionTimeoutMs: 0, // disabled: sessions stay open indefinitely by default
       ...options,
     }
+    // A custom rate limit config that omits `skipPaths` keeps the default /health exemption;
+    // an explicit list (even an empty one) is honoured.
+    if (this.options.rateLimitConfig && this.options.rateLimitConfig.skipPaths === undefined) {
+      this.options.rateLimitConfig = { ...this.options.rateLimitConfig, skipPaths: ["/health"] }
+    }
     this.app = express()
     if (this.options.trustProxy !== undefined) {
       this.app.set("trust proxy", this.options.trustProxy)

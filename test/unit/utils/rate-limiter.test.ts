@@ -183,6 +183,23 @@ describe("RateLimiter", () => {
       expect(rateLimiter.getStatus("user1")?.count).toBe(1)
     })
 
+    it("should not refund a newer window than the one that was charged", () => {
+      const { resetTime } = rateLimiter.checkLimit("user1")
+      vi.advanceTimersByTime(60000)
+      rateLimiter.checkLimit("user1")
+
+      rateLimiter.refund("user1", resetTime)
+      expect(rateLimiter.getStatus("user1")?.count).toBe(1)
+    })
+
+    it("should refund the window that was charged", () => {
+      const { resetTime } = rateLimiter.checkLimit("user1")
+      rateLimiter.checkLimit("user1")
+
+      rateLimiter.refund("user1", resetTime)
+      expect(rateLimiter.getStatus("user1")?.count).toBe(1)
+    })
+
     it("should not go below zero or touch unknown identifiers", () => {
       rateLimiter.checkLimit("user1")
       rateLimiter.refund("user1")
@@ -720,6 +737,40 @@ describe("createRateLimitMiddleware", () => {
 
       expect(mockNext).toHaveBeenCalledTimes(10)
       expect(ipLimiter.getStatus("ip:127.0.0.1")?.count).toBe(10)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+  })
+
+  describe("enforceIpLimit", () => {
+    const sessionReq = (sessionId: string) => ({
+      ip: "127.0.0.1",
+      connection: {},
+      header: (name: string) => (name === "mcp-session-id" ? sessionId : undefined),
+    })
+
+    it("should not refund charges into windows opened after the request was charged", () => {
+      const { middleware, enforceIpLimit, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        resolveSessionId: (req: any) => req.header("mcp-session-id"),
+      })
+
+      // A delayed initialize is charged to the session in the first window...
+      const delayedRes = { ...mockRes, locals: {} as Record<string, unknown> }
+      middleware(sessionReq("session-a"), delayedRes, mockNext)
+
+      // ...the window ends, a newer request opens the next one, and the IP bucket is spent.
+      vi.advanceTimersByTime(60000)
+      middleware(sessionReq("session-a"), { ...mockRes, locals: {} }, mockNext)
+      limiter.checkLimit("ip:127.0.0.1")
+      const ipTotalBefore = ipLimiter.getStatus("ip:127.0.0.1")?.count
+
+      // Rejecting the delayed request must leave the newer window's counts alone.
+      expect(enforceIpLimit(sessionReq("session-a"), delayedRes)).toBe(false)
+      expect(limiter.getStatus("session:session-a")?.count).toBe(1)
+      expect(ipLimiter.getStatus("ip:127.0.0.1")?.count).toBe(ipTotalBefore)
 
       limiter.destroy()
       ipLimiter.destroy()
