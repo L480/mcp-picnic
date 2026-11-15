@@ -2,14 +2,18 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { Request, Response, NextFunction } from "express"
 import cors from "cors"
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js"
+import {
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from "@modelcontextprotocol/sdk/server/auth/router.js"
 // Pulls in the `Request.auth` type augmentation from the SDK's bearer-auth middleware.
 import "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js"
 import { BaseTransportServer } from "./base.js"
 import { TransportError, ErrorCode, ErrorUtils } from "../types/errors.js"
-import { createRateLimitMiddleware, RateLimitConfig } from "../utils/rate-limiter.js"
+import { createRateLimitMiddleware, normalizeIp, RateLimitConfig } from "../utils/rate-limiter.js"
 import { StaticTokenOAuthProvider } from "./oauth-provider.js"
 import { randomUUID, timingSafeEqual } from "crypto"
+import { TrustProxySetting } from "../utils/trust-proxy.js"
 
 /**
  * Configuration options for the HTTP server
@@ -37,14 +41,13 @@ export interface StreamableHttpServerOptions {
    * have to redo the OAuth flow whenever the process restarts).
    */
   oauthStateFile?: string
-  /**
-   * Express `trust proxy` setting. Set when running behind a reverse proxy so
-   * client IPs are derived from `X-Forwarded-For` and the rate limiter works.
-   * Accepts the same values as Express (`true`, hop count, preset/subnet string).
-   */
-  trustProxy?: boolean | number | string
   corsOptions?: cors.CorsOptions
   rateLimitConfig?: RateLimitConfig
+  /**
+   * Express `trust proxy` setting. Set this when running behind a reverse proxy so `req.ip`
+   * (used for rate limiting and logging) comes from `X-Forwarded-For`. Unset trusts no proxy.
+   */
+  trustProxy?: TrustProxySetting
   requestTimeoutMs?: number
   maxRequestSizeBytes?: number
   enableRequestLogging?: boolean
@@ -74,6 +77,8 @@ export class StreamableHttpServer extends BaseTransportServer {
   private sessionTimeouts = new Map<string, NodeJS.Timeout>()
   private oauthProvider?: StaticTokenOAuthProvider
   private resourceMetadataUrl?: string
+  /** Client IP that created each session, used to bind session rate-limit buckets. */
+  private sessionClientIps = new Map<string, string>()
 
   /**
    * Create a new HTTP server for MCP over HTTP
@@ -88,7 +93,7 @@ export class StreamableHttpServer extends BaseTransportServer {
       authHeaderName: "x-mcp-token",
       oauthEnabled: true,
       corsOptions: { origin: "*" },
-      rateLimitConfig: { windowMs: 15 * 60 * 1000, maxRequests: 100 },
+      rateLimitConfig: { windowMs: 15 * 60 * 1000, maxRequests: 100, skipPaths: ["/health"] },
       requestTimeoutMs: 10000,
       maxRequestSizeBytes: 1024 * 1024 * 10, // 10MB
       enableRequestLogging: true,
@@ -96,7 +101,15 @@ export class StreamableHttpServer extends BaseTransportServer {
       sessionTimeoutMs: 0, // disabled: sessions stay open indefinitely by default
       ...options,
     }
+    // A custom rate limit config that omits `skipPaths` keeps the default /health exemption;
+    // an explicit list (even an empty one) is honoured.
+    if (this.options.rateLimitConfig && this.options.rateLimitConfig.skipPaths === undefined) {
+      this.options.rateLimitConfig = { ...this.options.rateLimitConfig, skipPaths: ["/health"] }
+    }
     this.app = express()
+    if (this.options.trustProxy !== undefined) {
+      this.app.set("trust proxy", this.options.trustProxy)
+    }
 
     this.port = this.options.port!
     this.host = this.options.host!
@@ -112,11 +125,6 @@ export class StreamableHttpServer extends BaseTransportServer {
    * Set up middleware for the Express app
    */
   private setupMiddleware(): void {
-    // Honour X-Forwarded-* headers when running behind a reverse proxy. Without
-    // this, Express reports the proxy's IP and express-rate-limit throws
-    // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR, which breaks the OAuth token endpoint.
-    this.app.set("trust proxy", this.options.trustProxy ?? false)
-
     // Request logging middleware
     if (this.options.enableRequestLogging) {
       this.app.use((req: Request, res: Response, next: NextFunction) => {
@@ -135,7 +143,10 @@ export class StreamableHttpServer extends BaseTransportServer {
 
     // Rate limiting middleware
     if (this.options.rateLimitConfig) {
-      this.rateLimiter = createRateLimitMiddleware(this.options.rateLimitConfig)
+      this.rateLimiter = createRateLimitMiddleware({
+        ...this.options.rateLimitConfig,
+        resolveSessionId: (req: Request) => this.resolveRateLimitSession(req),
+      })
       this.app.use(this.rateLimiter.middleware)
     }
 
@@ -164,30 +175,17 @@ export class StreamableHttpServer extends BaseTransportServer {
           return next()
         }
 
-        const headerName = this.options.authHeaderName ?? "x-mcp-token"
-        const headerToken = req.header(headerName)
-        const authorizationHeader = req.header("authorization")
-        const bearerToken =
-          typeof authorizationHeader === "string" && authorizationHeader.startsWith("Bearer ")
-            ? authorizationHeader.slice(7)
-            : undefined
-
         // 1. Backwards-compatible shared-token auth (custom header or raw
         //    bearer token equal to the shared secret).
-        const staticTokenValid =
-          this.compareAuthTokens(headerToken) ||
-          (bearerToken !== undefined && this.compareAuthTokens(bearerToken))
-        if (staticTokenValid) {
+        if (this.hasValidStaticToken(req)) {
           return next()
         }
 
         // 2. OAuth-issued bearer token (used by Claude's custom connectors).
-        if (this.oauthProvider && bearerToken !== undefined) {
-          const authInfo = this.oauthProvider.getValidAccessToken(bearerToken)
-          if (authInfo) {
-            req.auth = authInfo
-            return next()
-          }
+        const authInfo = this.getOAuthAuthInfo(req)
+        if (authInfo) {
+          req.auth = authInfo
+          return next()
         }
 
         // Advertise where to discover OAuth so compatible clients can start the
@@ -279,6 +277,70 @@ export class StreamableHttpServer extends BaseTransportServer {
         id: null,
       })
     })
+  }
+
+  /**
+   * True when no auth token is configured, or the request carries a valid shared
+   * token or OAuth-issued access token.
+   */
+  private isAuthorized(req: Request): boolean {
+    if (!this.options.authToken) {
+      return true
+    }
+
+    return this.hasValidStaticToken(req) || this.getOAuthAuthInfo(req) !== undefined
+  }
+
+  /**
+   * Bearer token from the `Authorization` header, if present.
+   */
+  private getBearerToken(req: Request): string | undefined {
+    const authorizationHeader = req.header("authorization")
+    return typeof authorizationHeader === "string" && authorizationHeader.startsWith("Bearer ")
+      ? authorizationHeader.slice(7)
+      : undefined
+  }
+
+  /**
+   * True when the request carries the shared `authToken`, either in the custom
+   * auth header or as a raw bearer token.
+   */
+  private hasValidStaticToken(req: Request): boolean {
+    const headerName = this.options.authHeaderName ?? "x-mcp-token"
+    const bearerToken = this.getBearerToken(req)
+    return (
+      this.compareAuthTokens(req.header(headerName)) ||
+      (bearerToken !== undefined && this.compareAuthTokens(bearerToken))
+    )
+  }
+
+  /**
+   * Auth info for a valid OAuth-issued bearer token, or `undefined` when OAuth is
+   * disabled or the token is unknown or expired.
+   */
+  private getOAuthAuthInfo(req: Request) {
+    const bearerToken = this.getBearerToken(req)
+    if (!this.oauthProvider || bearerToken === undefined) {
+      return undefined
+    }
+    return this.oauthProvider.getValidAccessToken(bearerToken)
+  }
+
+  /**
+   * Session to rate-limit a request under, or `undefined` to limit it by client IP. A session
+   * bucket is used only for a live session, on an authorized request, from the client IP that
+   * created it, so nobody else can drain (or borrow) a session's quota with its ID.
+   */
+  private resolveRateLimitSession(req: Request): string | undefined {
+    const sessionId = req.header("mcp-session-id")
+    if (!sessionId || !this.getTransport(sessionId) || !this.isAuthorized(req)) {
+      return undefined
+    }
+
+    const ownerIp = this.sessionClientIps.get(sessionId)
+    return ownerIp !== undefined && req.ip !== undefined && ownerIp === normalizeIp(req.ip)
+      ? sessionId
+      : undefined
   }
 
   private compareAuthTokens(token: string | undefined): boolean {
@@ -469,7 +531,16 @@ export class StreamableHttpServer extends BaseTransportServer {
     const isInitialize = isInitializeRequest(req.body)
 
     if (isInitialize) {
-      const transport = await this.createNewSession()
+      // Session creation stays IP-limited even when the request carried a live session ID (and
+      // was charged to that session), so a client can't mint sessions on session quota.
+      if (
+        this.rateLimiter &&
+        res.locals.rateLimitSessionId !== undefined &&
+        !this.rateLimiter.enforceIpLimit(req, res)
+      ) {
+        return
+      }
+      const transport = await this.createNewSession(req.ip)
       await transport.handleRequest(req, res, req.body)
     } else {
       if (!sessionId) {
@@ -484,7 +555,10 @@ export class StreamableHttpServer extends BaseTransportServer {
         // Claude's connector, that the session is gone and they should silently
         // re-initialize a new one instead of surfacing a hard "disconnected"
         // error that requires the user to manually reconnect the integration.
-        throw new TransportError(ErrorCode.TRANSPORT_SESSION_EXPIRED, "Session not found or expired")
+        throw new TransportError(
+          ErrorCode.TRANSPORT_SESSION_EXPIRED,
+          "Session not found or expired",
+        )
       }
       this.refreshSessionTimeout(sessionId)
       await transport.handleRequest(req, res, req.body)
@@ -576,6 +650,7 @@ export class StreamableHttpServer extends BaseTransportServer {
     // Clean up rate limiter
     if (this.rateLimiter) {
       this.rateLimiter.limiter.destroy()
+      this.rateLimiter.ipLimiter.destroy()
     }
 
     // Close the HTTP server
@@ -599,7 +674,10 @@ export class StreamableHttpServer extends BaseTransportServer {
     console.error("HTTP server stopped successfully")
   }
 
-  public async createNewSession(): Promise<StreamableHTTPServerTransport> {
+  /**
+   * @param clientIp IP of the client creating the session; binds the session's rate-limit bucket
+   */
+  public async createNewSession(clientIp?: string): Promise<StreamableHTTPServerTransport> {
     if (Object.keys(this.transports).length >= this.options.maxConcurrentSessions!) {
       throw new TransportError(ErrorCode.SESSION_LIMIT_EXCEEDED, "Max concurrent sessions reached")
     }
@@ -608,6 +686,9 @@ export class StreamableHttpServer extends BaseTransportServer {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sid) => {
         this.transports[sid] = transport
+        if (clientIp) {
+          this.sessionClientIps.set(sid, normalizeIp(clientIp))
+        }
         this.setupSessionTimeout(sid)
         this.emit("session-created", sid)
       },
@@ -627,13 +708,15 @@ export class StreamableHttpServer extends BaseTransportServer {
   }
 
   public getTransport(sessionId: string): StreamableHTTPServerTransport | undefined {
-    return this.transports[sessionId]
+    // Own-property check so IDs like "constructor" don't resolve to Object.prototype members.
+    return Object.hasOwn(this.transports, sessionId) ? this.transports[sessionId] : undefined
   }
 
   public cleanupSession(sessionId: string): void {
-    const transport = this.transports[sessionId]
+    const transport = this.getTransport(sessionId)
     if (transport) {
       delete this.transports[sessionId]
+      this.sessionClientIps.delete(sessionId)
       const timeout = this.sessionTimeouts.get(sessionId)
       if (timeout) {
         clearTimeout(timeout)

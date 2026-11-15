@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import {
   RateLimiter,
   createRateLimitMiddleware,
+  normalizeIp,
   RateLimitConfig,
 } from "../../../src/utils/rate-limiter.js"
 import { TransportError, ErrorCode } from "../../../src/types/errors.js"
@@ -170,6 +171,43 @@ describe("RateLimiter", () => {
 
       expect(status).toBeNull()
       limiter.destroy()
+    })
+  })
+
+  describe("refund", () => {
+    it("should undo one counted request in the current window", () => {
+      rateLimiter.checkLimit("user1")
+      rateLimiter.checkLimit("user1")
+      rateLimiter.refund("user1")
+
+      expect(rateLimiter.getStatus("user1")?.count).toBe(1)
+    })
+
+    it("should not refund a newer window than the one that was charged", () => {
+      const { resetTime } = rateLimiter.checkLimit("user1")
+      vi.advanceTimersByTime(60000)
+      rateLimiter.checkLimit("user1")
+
+      rateLimiter.refund("user1", resetTime)
+      expect(rateLimiter.getStatus("user1")?.count).toBe(1)
+    })
+
+    it("should refund the window that was charged", () => {
+      const { resetTime } = rateLimiter.checkLimit("user1")
+      rateLimiter.checkLimit("user1")
+
+      rateLimiter.refund("user1", resetTime)
+      expect(rateLimiter.getStatus("user1")?.count).toBe(1)
+    })
+
+    it("should not go below zero or touch unknown identifiers", () => {
+      rateLimiter.checkLimit("user1")
+      rateLimiter.refund("user1")
+      rateLimiter.refund("user1")
+      rateLimiter.refund("user2")
+
+      expect(rateLimiter.getStatus("user1")?.count).toBe(0)
+      expect(rateLimiter.getStatus("user2")).toBeNull()
     })
   })
 
@@ -419,7 +457,7 @@ describe("createRateLimitMiddleware", () => {
 
       middleware(mockReq, mockRes, mockNext)
 
-      expect(limiter.getStatus("127.0.0.1")).not.toBeNull()
+      expect(limiter.getStatus("ip:127.0.0.1")).not.toBeNull()
 
       limiter.destroy()
     })
@@ -435,7 +473,7 @@ describe("createRateLimitMiddleware", () => {
       const reqWithoutIP = { connection: {} }
       middleware(reqWithoutIP, mockRes, mockNext)
 
-      expect(limiter.getStatus("unknown")).not.toBeNull()
+      expect(limiter.getStatus("ip:unknown")).not.toBeNull()
       expect(mockNext).toHaveBeenCalled()
 
       limiter.destroy()
@@ -511,6 +549,234 @@ describe("createRateLimitMiddleware", () => {
     })
   })
 
+  describe("skipPaths", () => {
+    it("should not count or limit requests to skipped paths", () => {
+      const { middleware, limiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        skipPaths: ["/health"],
+      })
+
+      for (const path of ["/health", "/health/", "/HEALTH"]) {
+        middleware({ ...mockReq, path }, mockRes, mockNext)
+      }
+
+      expect(mockNext).toHaveBeenCalledTimes(3)
+      expect(mockRes.set).not.toHaveBeenCalled()
+      expect(limiter.getStatus("ip:127.0.0.1")).toBeNull()
+
+      // The MCP endpoint still has its full quota
+      middleware({ ...mockReq, path: "/mcp" }, mockRes, mockNext)
+      expect(mockRes.status).not.toHaveBeenCalled()
+      middleware({ ...mockReq, path: "/mcp" }, mockRes, mockNext)
+      expect(mockRes.status).toHaveBeenCalledWith(429)
+
+      limiter.destroy()
+    })
+
+    it("should only skip exact path matches", () => {
+      const { middleware, limiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 10,
+        skipPaths: ["/health"],
+      })
+
+      middleware({ ...mockReq, path: "/healthz" }, mockRes, mockNext)
+      middleware({ ...mockReq, path: "/health/details" }, mockRes, mockNext)
+
+      expect(limiter.getStatus("ip:127.0.0.1")?.count).toBe(2)
+
+      limiter.destroy()
+    })
+  })
+
+  describe("session-aware identifiers", () => {
+    const sessionReq = (ip: string, sessionId?: string) => ({
+      ip,
+      connection: {},
+      header: (name: string) => (name === "mcp-session-id" ? sessionId : undefined),
+    })
+    const fromHeader = (req: any) => req.header("mcp-session-id")
+
+    it("should give each resolved session its own bucket behind a shared IP", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        resolveSessionId: fromHeader,
+      })
+
+      middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+      middleware(sessionReq("127.0.0.1", "session-b"), mockRes, mockNext)
+      middleware(sessionReq("127.0.0.1"), mockRes, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(3)
+      expect(mockRes.status).not.toHaveBeenCalled()
+      expect(limiter.getStatus("session:session-a")?.count).toBe(1)
+      expect(limiter.getStatus("session:session-b")?.count).toBe(1)
+      expect(limiter.getStatus("ip:127.0.0.1")?.count).toBe(1)
+
+      middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+      expect(mockRes.status).toHaveBeenCalledWith(429)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should limit by IP when no session is resolved", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        resolveSessionId: () => undefined,
+      })
+
+      middleware(sessionReq("127.0.0.1", "made-up-1"), mockRes, mockNext)
+      middleware(sessionReq("127.0.0.1", "made-up-2"), mockRes, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(1)
+      expect(mockRes.status).toHaveBeenCalledWith(429)
+      expect(limiter.getStatus("session:made-up-1")).toBeNull()
+      expect(limiter.getStatus("ip:127.0.0.1")?.count).toBe(1)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should ignore session IDs when no session resolver is configured", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 10,
+      })
+
+      middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+
+      expect(limiter.getStatus("session:session-a")).toBeNull()
+      expect(limiter.getStatus("ip:127.0.0.1")).not.toBeNull()
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should cap all requests from one IP across its sessions", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 2,
+        maxRequestsPerIp: 3,
+        resolveSessionId: fromHeader,
+      })
+
+      middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+      middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+      middleware(sessionReq("127.0.0.1", "session-b"), mockRes, mockNext)
+      expect(mockNext).toHaveBeenCalledTimes(3)
+
+      // session-b still has quota, but the IP's aggregate ceiling is spent.
+      middleware(sessionReq("127.0.0.1", "session-b"), mockRes, mockNext)
+      expect(mockNext).toHaveBeenCalledTimes(3)
+      expect(mockRes.status).toHaveBeenCalledWith(429)
+      expect(mockRes.set).toHaveBeenCalledWith(
+        expect.objectContaining({ "X-RateLimit-Limit": "3" }),
+      )
+
+      // Another IP is unaffected.
+      middleware(sessionReq("10.0.0.2", "session-c"), mockRes, mockNext)
+      expect(mockNext).toHaveBeenCalledTimes(4)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should not charge the per-IP total for rejected requests", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 2,
+        maxRequestsPerIp: 5,
+        resolveSessionId: fromHeader,
+      })
+
+      // session-a exhausts its own bucket and keeps retrying.
+      for (let i = 0; i < 10; i++) {
+        middleware(sessionReq("127.0.0.1", "session-a"), mockRes, mockNext)
+      }
+      expect(mockNext).toHaveBeenCalledTimes(2)
+      expect(ipLimiter.getStatus("ip:127.0.0.1")?.count).toBe(2)
+
+      // Other sessions behind the same IP are unaffected.
+      middleware(sessionReq("127.0.0.1", "session-b"), mockRes, mockNext)
+      expect(mockNext).toHaveBeenCalledTimes(3)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should treat IPv4-mapped IPv6 and IPv4 as the same client", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+      })
+
+      middleware(sessionReq("::ffff:100.64.0.1"), mockRes, mockNext)
+      middleware(sessionReq("100.64.0.1"), mockRes, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(1)
+      expect(limiter.getStatus("ip:100.64.0.1")?.count).toBe(1)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+
+    it("should default the per-IP ceiling to 10x maxRequests", () => {
+      const { middleware, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        resolveSessionId: fromHeader,
+      })
+
+      for (let i = 0; i < 11; i++) {
+        middleware(sessionReq("127.0.0.1", `session-${i}`), mockRes, mockNext)
+      }
+
+      expect(mockNext).toHaveBeenCalledTimes(10)
+      expect(ipLimiter.getStatus("ip:127.0.0.1")?.count).toBe(10)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+  })
+
+  describe("enforceIpLimit", () => {
+    const sessionReq = (sessionId: string) => ({
+      ip: "127.0.0.1",
+      connection: {},
+      header: (name: string) => (name === "mcp-session-id" ? sessionId : undefined),
+    })
+
+    it("should not refund charges into windows opened after the request was charged", () => {
+      const { middleware, enforceIpLimit, limiter, ipLimiter } = createRateLimitMiddleware({
+        windowMs: 60000,
+        maxRequests: 1,
+        resolveSessionId: (req: any) => req.header("mcp-session-id"),
+      })
+
+      // A delayed initialize is charged to the session in the first window...
+      const delayedRes = { ...mockRes, locals: {} as Record<string, unknown> }
+      middleware(sessionReq("session-a"), delayedRes, mockNext)
+
+      // ...the window ends, a newer request opens the next one, and the IP bucket is spent.
+      vi.advanceTimersByTime(60000)
+      middleware(sessionReq("session-a"), { ...mockRes, locals: {} }, mockNext)
+      limiter.checkLimit("ip:127.0.0.1")
+      const ipTotalBefore = ipLimiter.getStatus("ip:127.0.0.1")?.count
+
+      // Rejecting the delayed request must leave the newer window's counts alone.
+      expect(enforceIpLimit(sessionReq("session-a"), delayedRes)).toBe(false)
+      expect(limiter.getStatus("session:session-a")?.count).toBe(1)
+      expect(ipLimiter.getStatus("ip:127.0.0.1")?.count).toBe(ipTotalBefore)
+
+      limiter.destroy()
+      ipLimiter.destroy()
+    })
+  })
+
   describe("edge cases", () => {
     it("should handle connection.remoteAddress fallback", () => {
       const config: RateLimitConfig = {
@@ -526,7 +792,7 @@ describe("createRateLimitMiddleware", () => {
 
       middleware(reqWithConnectionIP, mockRes, mockNext)
 
-      expect(limiter.getStatus("192.168.1.1")).not.toBeNull()
+      expect(limiter.getStatus("ip:192.168.1.1")).not.toBeNull()
       expect(mockNext).toHaveBeenCalled()
 
       limiter.destroy()
@@ -544,10 +810,23 @@ describe("createRateLimitMiddleware", () => {
 
       middleware(reqWithoutAnyIP, mockRes, mockNext)
 
-      expect(limiter.getStatus("unknown")).not.toBeNull()
+      expect(limiter.getStatus("ip:unknown")).not.toBeNull()
       expect(mockNext).toHaveBeenCalled()
 
       limiter.destroy()
     })
+  })
+})
+
+describe("normalizeIp", () => {
+  it("should strip the IPv4-mapped IPv6 prefix", () => {
+    expect(normalizeIp("::ffff:127.0.0.1")).toBe("127.0.0.1")
+    expect(normalizeIp("::FFFF:10.0.0.1")).toBe("10.0.0.1")
+  })
+
+  it("should leave plain IPv4 and IPv6 addresses alone", () => {
+    expect(normalizeIp("127.0.0.1")).toBe("127.0.0.1")
+    expect(normalizeIp("::1")).toBe("::1")
+    expect(normalizeIp("::ffff:abcd")).toBe("::ffff:abcd")
   })
 })
