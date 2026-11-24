@@ -81,6 +81,50 @@ describe("ToolRegistry", () => {
     })
   })
 
+  describe("input JSON schema contract", () => {
+    const expectedSchema = {
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
+        filter: {
+          type: "object",
+          properties: { status: { type: "string" } },
+          required: ["status"],
+          additionalProperties: false,
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    }
+
+    beforeEach(() => {
+      toolRegistry.register({
+        name: "contract-tool",
+        description: "Schema contract",
+        inputSchema: z.object({
+          query: z.string(),
+          limit: z.number().int().min(1).max(20).default(5),
+          filter: z.object({ status: z.string() }).optional(),
+        }),
+        handler: async () => "ok",
+      })
+    })
+
+    it("advertises draft-07, optional defaulted fields and closed nested objects in getToolsList", () => {
+      expect(toolRegistry.getToolsList()[0].inputSchema).toEqual(expectedSchema)
+    })
+
+    it("advertises the same schema in getToolDefinitions", () => {
+      const definitions = toolRegistry.getToolDefinitions() as Record<
+        string,
+        { inputSchema: unknown }
+      >
+      expect(definitions["CONTRACT-TOOL"].inputSchema).toEqual(expectedSchema)
+    })
+  })
+
   describe("getToolsList", () => {
     it("should return empty array when no tools registered", () => {
       const list = toolRegistry.getToolsList()
