@@ -21,11 +21,11 @@ const configSchema = z.object({
   ENABLE_HTTP_SERVER: z
     .string()
     .transform((val) => val === "true")
-    .default("false"),
+    .default(false),
   HTTP_PORT: z
     .string()
     .transform((val) => parseInt(val, 10))
-    .default("3000"),
+    .default(3000),
   HTTP_HOST: z.string().default("localhost"),
   HTTP_AUTH_TOKEN: z.string().optional(),
   HTTP_AUTH_HEADER_NAME: z.string().default("x-mcp-token"),
@@ -35,7 +35,7 @@ const configSchema = z.object({
   HTTP_OAUTH_ENABLED: z
     .string()
     .transform((val) => val !== "false")
-    .default("true"),
+    .default(true),
   // Public HTTPS base URL the server is reachable at (e.g. https://picnic.example.com).
   // Required for the OAuth flow when the server is reached over anything other
   // than localhost, because OAuth issuer URLs must be HTTPS.
@@ -62,7 +62,7 @@ const configSchema = z.object({
   HTTP_SESSION_TIMEOUT_MS: z
     .string()
     .transform((val) => parseInt(val, 10))
-    .default("0"),
+    .default(0),
   HTTP_RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .int()

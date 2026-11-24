@@ -15,14 +15,16 @@ const mockLogin = vi.fn()
 const mockGetCart = vi.fn()
 vi.mock("picnic-api", () => {
   return {
-    default: vi.fn().mockImplementation((opts: any) => ({
-      auth: { login: mockLogin },
-      cart: { getCart: mockGetCart },
-      authKey: opts?.authKey ?? "fresh-auth-key",
-      url: "https://example.test/api/15",
-      baseHeaders: { "x-picnic-auth": opts?.authKey ?? "fresh-auth-key" },
-      picnicHeaders: { "x-picnic-agent": "agent", "x-picnic-did": "device" },
-    })),
+    default: vi.fn().mockImplementation(function (opts: any) {
+      return {
+        auth: { login: mockLogin },
+        cart: { getCart: mockGetCart },
+        authKey: opts?.authKey ?? "fresh-auth-key",
+        url: "https://example.test/api/15",
+        baseHeaders: { "x-picnic-auth": opts?.authKey ?? "fresh-auth-key" },
+        picnicHeaders: { "x-picnic-agent": "agent", "x-picnic-did": "device" },
+      }
+    }),
   }
 })
 
