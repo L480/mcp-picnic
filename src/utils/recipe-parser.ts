@@ -133,6 +133,9 @@ async function followShareRedirects(start: URL): Promise<URL> {
         `Recipe share link redirected off picnic.app to ${next.hostname}; refusing to follow`,
       )
     }
+    if (next.protocol !== "https:") {
+      throw new Error(`Recipe share link redirected to non-https ${next.href}; refusing to follow`)
+    }
     current = next
   }
   throw new Error(`Recipe share link exceeded ${MAX_SHARE_REDIRECTS} redirects`)

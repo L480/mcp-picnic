@@ -89,6 +89,13 @@ describe("resolveRecipeId", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it("refuses a same-host redirect that downgrades to http", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(redirectTo("http://picnic.app/de/go/next"))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(resolveRecipeId("https://picnic.app/de/go/xxx")).rejects.toThrow(/non-https/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it("stops after too many redirects", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => redirectTo("https://picnic.app/de/go/loop"))
     vi.stubGlobal("fetch", fetchMock)
