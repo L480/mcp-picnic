@@ -1,5 +1,4 @@
 import { z } from "zod"
-import { zodToJsonSchema } from "zod-to-json-schema"
 import { ToolError, ErrorCode, ErrorUtils } from "../types/errors.js"
 
 /**
@@ -72,6 +71,35 @@ interface StoredToolDefinition {
   annotations?: ToolAnnotations
 }
 
+/**
+ * Converts a tool's Zod input schema into the JSON Schema advertised to MCP clients.
+ *
+ * Uses the input side of the schema so fields with a `.default()` are optional for the caller.
+ * Emits draft-07 and closes objects with `additionalProperties: false`, matching what clients
+ * received from zod-to-json-schema before the Zod 4 migration.
+ */
+function toInputJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  return z.toJSONSchema(schema, {
+    io: "input",
+    target: "draft-7",
+    override: (ctx) => {
+      if (ctx.jsonSchema.type === "object" && ctx.jsonSchema.additionalProperties === undefined) {
+        ctx.jsonSchema.additionalProperties = false
+      }
+    },
+  })
+}
+
+/**
+ * Reduces Zod issues to fields that never carry the validated value, since error details are
+ * logged and tool arguments can hold secrets such as 2FA codes.
+ */
+function toSafeIssues(
+  error: z.ZodError,
+): Array<{ code: string; path: PropertyKey[]; message: string }> {
+  return error.issues.map(({ code, path, message }) => ({ code, path, message }))
+}
+
 class ToolRegistry {
   private tools = new Map<string, StoredToolDefinition>()
 
@@ -85,7 +113,7 @@ class ToolRegistry {
       definitions[name.toUpperCase()] = {
         name: tool.name,
         description: tool.description,
-        inputSchema: zodToJsonSchema(tool.inputSchema),
+        inputSchema: toInputJsonSchema(tool.inputSchema),
         ...(tool.annotations && { annotations: tool.annotations }),
       }
     }
@@ -96,7 +124,7 @@ class ToolRegistry {
     return Array.from(this.tools.values()).map((tool) => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: zodToJsonSchema(tool.inputSchema),
+      inputSchema: toInputJsonSchema(tool.inputSchema),
       ...(tool.annotations && { annotations: tool.annotations }),
     }))
   }
@@ -119,11 +147,12 @@ class ToolRegistry {
         if (error instanceof z.ZodError) {
           throw new ToolError(
             ErrorCode.TOOL_VALIDATION_FAILED,
-            `Invalid input for tool '${name}': ${error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
+            `Invalid input for tool '${name}': ${error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
+            // Error details are logged, so they carry the issues but never the raw arguments,
+            // which can hold secrets such as 2FA codes.
             {
               toolName: name,
-              validationErrors: error.errors,
-              providedArgs: args,
+              validationErrors: toSafeIssues(error),
             },
           )
         }
@@ -147,7 +176,6 @@ class ToolRegistry {
           {
             toolName: name,
             originalError: ErrorUtils.getErrorMessage(error),
-            args: validatedArgs,
           },
         )
       }
@@ -167,11 +195,10 @@ class ToolRegistry {
             ErrorUtils.logError(error, `Tool ${name} output validation`)
             throw new ToolError(
               ErrorCode.TOOL_EXECUTION_FAILED,
-              `Tool '${name}' returned invalid output: ${error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
+              `Tool '${name}' returned invalid output: ${error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
               {
                 toolName: name,
-                validationErrors: error.errors,
-                actualOutput: result,
+                validationErrors: toSafeIssues(error),
               },
             )
           }

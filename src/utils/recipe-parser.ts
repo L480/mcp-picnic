@@ -113,11 +113,39 @@ function assertAllowedShareUrl(raw: string): URL {
   return url
 }
 
+const MAX_SHARE_REDIRECTS = 5
+
+/**
+ * Follow a share link's HTTP redirects one hop at a time, checking every target host before
+ * requesting it. With `redirect: "follow"` the runtime would already have sent a request to an
+ * off-domain target by the time its final URL could be checked.
+ */
+async function followShareRedirects(start: URL): Promise<URL> {
+  let current = start
+  for (let hop = 0; hop <= MAX_SHARE_REDIRECTS; hop++) {
+    const res = await fetch(current.href, { method: "HEAD", redirect: "manual" })
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null
+    if (!location) return current
+
+    const next = new URL(location, current)
+    if (!isAllowedShareHost(next.hostname)) {
+      throw new Error(
+        `Recipe share link redirected off picnic.app to ${next.hostname}; refusing to follow`,
+      )
+    }
+    if (next.protocol !== "https:") {
+      throw new Error(`Recipe share link redirected to non-https ${next.href}; refusing to follow`)
+    }
+    current = next
+  }
+  throw new Error(`Recipe share link exceeded ${MAX_SHARE_REDIRECTS} redirects`)
+}
+
 /**
  * Resolve a Picnic recipe URL (any format) or bare recipe id to a 24-char hex
  * recipe id (a selling_group_id). The redirect-following request for short
- * share links is restricted to `picnic.app` hosts over HTTPS (host re-checked
- * after redirects) so it cannot be steered at arbitrary/internal hosts.
+ * share links is restricted to `picnic.app` hosts over HTTPS (host checked
+ * before every redirect hop) so it cannot be steered at arbitrary/internal hosts.
  */
 export async function resolveRecipeId(input: string): Promise<string> {
   const trimmed = input.trim()
@@ -131,14 +159,7 @@ export async function resolveRecipeId(input: string): Promise<string> {
   if (paramMatch) return paramMatch[1]
 
   if (/^https?:\/\//i.test(trimmed)) {
-    const startUrl = assertAllowedShareUrl(trimmed)
-    const res = await fetch(startUrl.href, { method: "HEAD", redirect: "follow" })
-    const finalUrl = new URL(res.url || startUrl.href)
-    if (!isAllowedShareHost(finalUrl.hostname)) {
-      throw new Error(
-        `Recipe share link redirected off picnic.app to ${finalUrl.hostname}; refusing to follow`,
-      )
-    }
+    const finalUrl = await followShareRedirects(assertAllowedShareUrl(trimmed))
     const resolvedMatch = finalUrl.href.match(RECIPE_ID_IN_URL_RE) ?? finalUrl.href.match(ID_PARAM_RE)
     if (resolvedMatch) return resolvedMatch[1]
   }

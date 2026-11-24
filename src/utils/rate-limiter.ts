@@ -242,8 +242,11 @@ export class RateLimiter {
  * trailing slash optional), so `/health/` and `/HEALTH` match a `/health` skip entry.
  */
 function normalizePath(path: string): string {
-  const trimmed = path.replace(/\/+$/, "")
-  return (trimmed || "/").toLowerCase()
+  // Trim trailing slashes with a scan rather than /\/+$/, which backtracks quadratically on
+  // attacker-controlled paths made of many slashes followed by another character.
+  let end = path.length
+  while (end > 0 && path[end - 1] === "/") end--
+  return (path.slice(0, end) || "/").toLowerCase()
 }
 
 /**

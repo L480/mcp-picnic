@@ -13,15 +13,15 @@ import { createMCPServer } from "../../../src/utils/server-factory"
 vi.mock("../../../src/utils/server-factory")
 
 vi.mock("@modelcontextprotocol/sdk/server/streamableHttp.js", () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation((options) => {
+  StreamableHTTPServerTransport: vi.fn().mockImplementation(function (options: any) {
     const transport = {
       sessionId: "test-session-id",
       close: vi.fn().mockResolvedValue(undefined),
       onclose: undefined,
-      handleRequest: vi.fn().mockResolvedValue(undefined),
-    }
-    if (options?.onsessioninitialized) {
-      options.onsessioninitialized(transport.sessionId)
+      // Like the real SDK transport, the session is only initialized once a request is handled.
+      handleRequest: vi.fn(async () => {
+        options?.onsessioninitialized?.(transport.sessionId)
+      }),
     }
     return transport
   }),
@@ -392,7 +392,10 @@ describe("StreamableHttpServer OAuth state persistence across restarts", () => {
   }
 
   beforeEach(() => {
-    stateFile = path.join(os.tmpdir(), `mcp-picnic-oauth-state-${randomBytes(8).toString("hex")}.json`)
+    stateFile = path.join(
+      os.tmpdir(),
+      `mcp-picnic-oauth-state-${randomBytes(8).toString("hex")}.json`,
+    )
   })
 
   afterEach(() => {

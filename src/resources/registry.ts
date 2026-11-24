@@ -75,7 +75,7 @@ class ResourceRegistry {
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new Error(
-          `Invalid arguments: ${error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
+          `Invalid arguments: ${error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
         )
       }
       throw error

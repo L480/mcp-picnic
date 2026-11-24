@@ -56,12 +56,21 @@ describe("resolveRecipeId", () => {
     ).resolves.toBe(RECIPE_ID)
   })
 
+  const redirectTo = (location: string) => new Response(null, { status: 302, headers: { location } })
+
   it("follows a short share link redirect on picnic.app", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ url: `https://picnic.app/de/rezepte/${RECIPE_ID}?path=selling_group_id%3D${RECIPE_ID}` }),
-    )
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(redirectTo("/de/go/abc123/next"))
+      .mockResolvedValueOnce(
+        redirectTo(`https://picnic.app/de/rezepte/${RECIPE_ID}?path=selling_group_id%3D${RECIPE_ID}`),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    vi.stubGlobal("fetch", fetchMock)
     await expect(resolveRecipeId("https://picnic.app/de/go/abc123")).resolves.toBe(RECIPE_ID)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls[1][0]).toBe("https://picnic.app/de/go/abc123/next")
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" })
   })
 
   it("refuses to request a non-picnic host (SSRF guard)", async () => {
@@ -73,9 +82,25 @@ describe("resolveRecipeId", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("refuses when a picnic.app link redirects off-domain", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ url: "https://evil.example/internal" }))
+  it("refuses when a picnic.app link redirects off-domain, without requesting the target", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(redirectTo("http://169.254.169.254/latest/meta-data"))
+    vi.stubGlobal("fetch", fetchMock)
     await expect(resolveRecipeId("https://picnic.app/de/go/xxx")).rejects.toThrow(/redirected off/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("refuses a same-host redirect that downgrades to http", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(redirectTo("http://picnic.app/de/go/next"))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(resolveRecipeId("https://picnic.app/de/go/xxx")).rejects.toThrow(/non-https/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("stops after too many redirects", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => redirectTo("https://picnic.app/de/go/loop"))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(resolveRecipeId("https://picnic.app/de/go/loop")).rejects.toThrow(/exceeded 5 redirects/)
+    expect(fetchMock).toHaveBeenCalledTimes(6)
   })
 
   it("throws when no id can be extracted", async () => {

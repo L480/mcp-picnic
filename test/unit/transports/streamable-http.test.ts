@@ -22,21 +22,22 @@ const mockTransport = {
 }
 
 vi.mock("@modelcontextprotocol/sdk/server/streamableHttp.js", () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation((options) => {
-    const transport = {
+  StreamableHTTPServerTransport: vi.fn().mockImplementation(function (options: any) {
+    const transport: any = {
       ...mockTransport,
       sessionId: "test-session-id",
       close: vi.fn().mockResolvedValue(undefined),
       onclose: undefined,
-      handleRequest: vi.fn().mockResolvedValue(undefined),
-    }
-
-    if (options?.onsessioninitialized) {
-      const sessionId = options.sessionIdGenerator
-        ? options.sessionIdGenerator()
-        : transport.sessionId
-      transport.sessionId = sessionId
-      options.onsessioninitialized(sessionId)
+      // Like the real SDK transport, the session is only initialized once the first
+      // (initialize) request is handled, never synchronously in the constructor.
+      handleRequest: vi.fn(async () => {
+        if (options?.onsessioninitialized) {
+          transport.sessionId = options.sessionIdGenerator
+            ? options.sessionIdGenerator()
+            : transport.sessionId
+          options.onsessioninitialized(transport.sessionId)
+        }
+      }),
     }
     return transport
   }),
@@ -149,7 +150,9 @@ describe("StreamableHttpServer", () => {
     })
 
     await server.start()
-    await server.createNewSession()
+    const transport = await server.createNewSession()
+    await transport.handleRequest({} as any, {} as any)
+    expect(server.getActiveSessions()).toHaveLength(1)
     await server.stop()
 
     expect(server.getActiveSessions()).toHaveLength(0)
@@ -288,7 +291,7 @@ describe("StreamableHttpServer", () => {
 
     /** Make the SDK mock initialize the session while handling the request, like the real SDK. */
     const mockInitializingTransport = () =>
-      vi.mocked(StreamableHTTPServerTransport).mockImplementationOnce((options: any) => {
+      vi.mocked(StreamableHTTPServerTransport).mockImplementationOnce(function (options: any) {
         const transport: any = {
           sessionId: undefined,
           close: vi.fn().mockResolvedValue(undefined),

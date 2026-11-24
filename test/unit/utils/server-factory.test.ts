@@ -9,7 +9,7 @@ import packageJson from "../../../package.json"
 // Mock the SDK McpServer
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => {
   return {
-    McpServer: vi.fn().mockImplementation((info, init) => {
+    McpServer: vi.fn().mockImplementation(function (info, init) {
       return {
         info,
         init,

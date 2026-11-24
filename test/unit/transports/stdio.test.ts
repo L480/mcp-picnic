@@ -4,9 +4,9 @@ import { StdioServer } from "../../../src/transports/stdio.js"
 
 // Mock the dependencies
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
-  StdioServerTransport: vi.fn().mockImplementation(() => ({
-    close: vi.fn().mockResolvedValue(undefined),
-  })),
+  StdioServerTransport: vi.fn().mockImplementation(function () {
+    return { close: vi.fn().mockResolvedValue(undefined) }
+  }),
 }))
 
 // Create a mock underlying server
@@ -50,7 +50,9 @@ describe("StdioServer", () => {
     }
 
     // Mock the StdioServerTransport constructor
-    ;(StdioServerTransport as any).mockImplementation(() => mockTransport)
+    ;(StdioServerTransport as any).mockImplementation(function () {
+      return mockTransport
+    })
 
     stdioServer = new StdioServer()
   })
@@ -98,7 +100,9 @@ describe("StdioServer", () => {
       const newMockTransport = {
         close: vi.fn().mockResolvedValue(undefined),
       }
-      ;(StdioServerTransport as any).mockImplementation(() => newMockTransport)
+      ;(StdioServerTransport as any).mockImplementation(function () {
+        return newMockTransport
+      })
 
       await stdioServer.start()
       const secondTransport = stdioServer["transport"]
@@ -154,7 +158,9 @@ describe("StdioServer", () => {
       const newMockTransport = {
         close: vi.fn().mockResolvedValue(undefined),
       }
-      ;(StdioServerTransport as any).mockImplementation(() => newMockTransport)
+      ;(StdioServerTransport as any).mockImplementation(function () {
+        return newMockTransport
+      })
 
       // Second cycle
       await stdioServer.start()
@@ -171,7 +177,9 @@ describe("StdioServer", () => {
       const newMockTransport = {
         close: vi.fn().mockResolvedValue(undefined),
       }
-      ;(StdioServerTransport as any).mockImplementation(() => newMockTransport)
+      ;(StdioServerTransport as any).mockImplementation(function () {
+        return newMockTransport
+      })
 
       await stdioServer.start()
       const secondTransport = stdioServer["transport"]
@@ -184,7 +192,7 @@ describe("StdioServer", () => {
   describe("error handling", () => {
     it("should handle StdioServerTransport constructor errors", async () => {
       const constructorError = new Error("Transport creation failed")
-      ;(StdioServerTransport as any).mockImplementation(() => {
+      ;(StdioServerTransport as any).mockImplementation(function () {
         throw constructorError
       })
 
