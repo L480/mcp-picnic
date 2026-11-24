@@ -379,6 +379,9 @@ describe("ToolRegistry", () => {
       })
       // Details end up in the logs, so the raw arguments must not be part of them.
       expect((error as ToolError).details).not.toHaveProperty("providedArgs")
+      expect((error as ToolError).details?.validationErrors).toEqual([
+        { code: "too_small", path: ["count"], message: expect.any(String) },
+      ])
     })
   })
 })

@@ -90,6 +90,16 @@ function toInputJsonSchema(schema: z.ZodType): Record<string, unknown> {
   })
 }
 
+/**
+ * Reduces Zod issues to fields that never carry the validated value, since error details are
+ * logged and tool arguments can hold secrets such as 2FA codes.
+ */
+function toSafeIssues(
+  error: z.ZodError,
+): Array<{ code: string; path: PropertyKey[]; message: string }> {
+  return error.issues.map(({ code, path, message }) => ({ code, path, message }))
+}
+
 class ToolRegistry {
   private tools = new Map<string, StoredToolDefinition>()
 
@@ -142,7 +152,7 @@ class ToolRegistry {
             // which can hold secrets such as 2FA codes.
             {
               toolName: name,
-              validationErrors: error.issues,
+              validationErrors: toSafeIssues(error),
             },
           )
         }
@@ -188,7 +198,7 @@ class ToolRegistry {
               `Tool '${name}' returned invalid output: ${error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
               {
                 toolName: name,
-                validationErrors: error.issues,
+                validationErrors: toSafeIssues(error),
               },
             )
           }
