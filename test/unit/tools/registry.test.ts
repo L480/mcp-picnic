@@ -324,16 +324,17 @@ describe("ToolRegistry", () => {
 
       toolRegistry.register(mockTool)
 
-      try {
-        await toolRegistry.executeTool("validation-details-tool", { count: -1 })
-      } catch (error) {
-        expect(error).toBeInstanceOf(ToolError)
-        expect((error as ToolError).details).toMatchObject({
-          toolName: "validation-details-tool",
-          validationErrors: expect.any(Array),
-          providedArgs: { count: -1 },
-        })
-      }
+      const error = await toolRegistry
+        .executeTool("validation-details-tool", { count: -1 })
+        .catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(ToolError)
+      expect((error as ToolError).details).toMatchObject({
+        toolName: "validation-details-tool",
+        validationErrors: expect.any(Array),
+      })
+      // Details end up in the logs, so the raw arguments must not be part of them.
+      expect((error as ToolError).details).not.toHaveProperty("providedArgs")
     })
   })
 })

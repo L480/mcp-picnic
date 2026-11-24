@@ -138,10 +138,11 @@ class ToolRegistry {
           throw new ToolError(
             ErrorCode.TOOL_VALIDATION_FAILED,
             `Invalid input for tool '${name}': ${error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ")}`,
+            // Error details are logged, so they carry the issues but never the raw arguments,
+            // which can hold secrets such as 2FA codes.
             {
               toolName: name,
               validationErrors: error.issues,
-              providedArgs: args,
             },
           )
         }
@@ -165,7 +166,6 @@ class ToolRegistry {
           {
             toolName: name,
             originalError: ErrorUtils.getErrorMessage(error),
-            args: validatedArgs,
           },
         )
       }
@@ -189,7 +189,6 @@ class ToolRegistry {
               {
                 toolName: name,
                 validationErrors: error.issues,
-                actualOutput: result,
               },
             )
           }
